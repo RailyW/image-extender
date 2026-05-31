@@ -2,6 +2,35 @@ import { NextRequest, NextResponse } from 'next/server'
 
 const DEFAULT_MODEL = 'google/gemini-3.1-flash-image-preview'
 
+const SUPPORTED_IMAGE_ASPECT_RATIOS = [
+  '1:1',
+  '2:3',
+  '3:2',
+  '3:4',
+  '4:3',
+  '4:5',
+  '5:4',
+  '9:16',
+  '16:9',
+  '21:9',
+] as const
+
+function aspectRatioValue(ratio: string): number {
+  const [w, h] = ratio.split(':').map(Number)
+  return w / h
+}
+
+function supportedAspectRatioForSize(width: number, height: number): string {
+  const target = width / height
+  return SUPPORTED_IMAGE_ASPECT_RATIOS
+    .map((ratio) => ({
+      ratio,
+      // Compare in log space so 2:1 and 1:2 errors are symmetric.
+      error: Math.abs(Math.log(aspectRatioValue(ratio) / target)),
+    }))
+    .sort((a, b) => a.error - b.error)[0].ratio
+}
+
 export async function POST(request: NextRequest) {
   try {
     const {
@@ -21,6 +50,7 @@ export async function POST(request: NextRequest) {
       spriteSheet,
       spriteAnchor,
       spriteAnim,
+      spriteBodyPlan,
       spriteFrameCount,
       spriteGridCols,
       spriteGridRows,
@@ -294,21 +324,79 @@ The user's material is: "${prompt.trim()}". Paint this material onto the gray re
       // across 8 frames (confirmed across multiple AI-sprite open-source
       // projects and dev blogs in 2026).
       const KEY_COLOR_HEX = '#FF00FF'
-      fullPrompt = `You are generating a single CHARACTER REFERENCE IMAGE for a 2D side-view game character. This image will be used downstream as a VISUAL ANCHOR for generating an 8-frame animation sprite-sheet — the model that paints those 8 frames will be shown THIS image and asked to match it exactly. The character's appearance in this image therefore needs to be definitive, readable, and crisp.
 
-POSE — NEUTRAL STANDING IDLE:
+      // Body plan controls the neutral reference POSE so the anchor's body
+      // matches the rig the sheet pass will skin (a quadruped on all fours, a
+      // serpent in an S-curve, a winged flyer, a resting blob, etc.).
+      const anchorBodyPlan =
+        typeof spriteBodyPlan === 'string' ? spriteBodyPlan : 'biped'
+      const ANCHOR_POSE: Record<
+        string,
+        { pose: string; composition: string }
+      > = {
+        biped: {
+          pose: `POSE — NEUTRAL STANDING IDLE:
 - Character stands upright in a natural, relaxed idle pose.
 - Profile view (side-view), facing RIGHT.
 - Feet flat on an implied floor, weight evenly distributed.
 - Arms hanging naturally at the sides (or holding the character's weapon at REST — sword pointing down, bow held loosely, etc.). Do NOT show the weapon being swung, drawn, or used.
 - Head looking forward (in the same direction the character faces — RIGHT).
-- Calm, attentive expression. Not surprised, not attacking, not crouching, not jumping.
+- Calm, attentive expression. Not surprised, not attacking, not crouching, not jumping.`,
+          composition: `- Character occupies ~70–85% of the frame's height.
+- Character's FEET sit near the bottom of the frame (with a small magenta margin below the feet).
+- Character's HEAD sits near the top of the frame (with a small magenta margin above the head).`,
+        },
+        quadruped: {
+          pose: `POSE — NEUTRAL STANDING (ON ALL FOURS):
+- Four-legged creature standing squarely on all four legs in a calm, relaxed stance.
+- Profile view (side-view), the whole body in profile, HEAD to the RIGHT.
+- All four feet flat on an implied floor; the two near-side legs slightly lit, the far-side legs slightly shaded so all four legs are distinguishable.
+- Head up and forward (facing RIGHT), neck relaxed, tail visible and hanging naturally.
+- Calm, attentive expression. Not crouching, not pouncing, not rearing.`,
+          composition: `- The full body length (nose to tail) is visible and occupies ~70–88% of the frame's WIDTH; the standing height fills most of the frame's height.
+- The FEET sit near the bottom of the frame (small magenta margin below the feet).
+- Nothing is cut off by the frame edges — the whole creature including tail and head is inside the frame.`,
+        },
+        serpent: {
+          pose: `POSE — NEUTRAL RESTING CURVE:
+- A long, limbless serpent / eel / fish body laid out in a gentle, readable S-curve.
+- Profile view (side-view), HEAD at the RIGHT end, tail tapering to the LEFT.
+- The body is a smooth tapered tube: thicker at the middle, thinner at the tail, with a clearly defined head and a small eye.
+- Calm and at rest. Mouth closed, not striking, not coiled tight.`,
+          composition: `- The whole body fills ~75–90% of the frame's WIDTH, the S-curve spanning a good part of the height.
+- The head (right) and tail tip (left) are both fully inside the frame with a small magenta margin.
+- Nothing is cut off by the frame edges.`,
+        },
+        flyer: {
+          pose: `POSE — NEUTRAL FLIGHT (WINGS SPREAD):
+- A winged creature shown in side profile, facing RIGHT, hovering with both wings SPREAD OUT and clearly visible.
+- The near wing is slightly lit, the far wing slightly shaded so the two wings are distinguishable.
+- Body level, head forward (RIGHT), tail extended behind, legs tucked or hanging relaxed.
+- Calm and steady, mid-air — not diving, not folded, not flapping hard.`,
+          composition: `- The full wingspan and body are visible and occupy ~70–90% of the frame.
+- The creature floats around the middle of the frame with magenta margins all around (it is airborne — do NOT plant it at the bottom).
+- Nothing (wing tips, tail, head) is cut off by the frame edges.`,
+        },
+        blob: {
+          pose: `POSE — NEUTRAL RESTING BLOB:
+- An amorphous blob / slime / ooze creature at rest, a rounded body sitting on an implied floor, slightly settled (a touch wider than tall).
+- Profile view (side-view), the EYES toward the RIGHT to establish facing.
+- Smooth, readable silhouette with a soft highlight on the upper-left and a clear bottom that rests on the ground.
+- Calm at rest — not hopping, not stretched, not splattered.`,
+          composition: `- The blob occupies ~60–80% of the frame and sits near the bottom (small magenta margin below where it meets the ground).
+- The whole body is visible with magenta margins on the sides and top.
+- Nothing is cut off by the frame edges.`,
+        },
+      }
+      const anchorPlan = ANCHOR_POSE[anchorBodyPlan] ?? ANCHOR_POSE.biped
+
+      fullPrompt = `You are generating a single CHARACTER REFERENCE IMAGE for a 2D side-view game creature. This image will be used downstream as a VISUAL ANCHOR for generating an 8-frame animation sprite-sheet — the model that paints those 8 frames will be shown THIS image and asked to match it exactly. The creature's appearance in this image therefore needs to be definitive, readable, and crisp.
+
+${anchorPlan.pose}
 
 COMPOSITION:
 - Character is centered horizontally in the frame.
-- Character occupies ~70–85% of the frame's height.
-- Character's FEET sit near the bottom of the frame (with a small magenta margin below the feet).
-- Character's HEAD sits near the top of the frame (with a small magenta margin above the head).
+${anchorPlan.composition}
 - The full character is visible — no body parts cut off by the frame edges, no zoom-in on the face, no head-only portrait.
 
 BACKGROUND:
@@ -323,7 +411,7 @@ ART DIRECTION:
 
 THE CHARACTER IS: "${prompt.trim()}".
 
-Paint that character, standing in the neutral idle pose described above, with pure flat ${KEY_COLOR_HEX} magenta everywhere else. The output is ONE SINGLE CHARACTER, not a sheet, not a grid, not multiple poses — just one definitive standing reference at ${width}×${height} pixels.`
+Paint that creature in the neutral pose described above, with pure flat ${KEY_COLOR_HEX} magenta everywhere else. The output is ONE SINGLE CHARACTER, not a sheet, not a grid, not multiple poses — just one definitive reference at ${width}×${height} pixels.`
     } else if (spriteSheet === true) {
       // Sprite-animation SHEET mode — single-call generation of an entire
       // N-frame keyframe sequence for a character animation.
@@ -462,11 +550,415 @@ ${buildFrameMap([
 ])}`,
       }
 
+      // Non-biped body plans: each has its own animation set + choreography.
+      // The deterministic pose map (utils/rigs/*) is still the authority on the
+      // exact per-frame pose; this text just names the motion for the model.
+      const quadrupedChoreography: Record<string, string> = {
+        idle: `IDLE — four-legged creature STANDING STILL on all fours, profile, head to the RIGHT, only slow breathing:
+${buildFrameMap([
+  'rest. All four legs planted, weight even, head up, tail relaxed.',
+  'inhale begins — ribcage rises a hair, head holds steady.',
+  'inhaling — chest fuller, back rises very slightly.',
+  'PEAK INHALE — chest fullest, posture tallest. Legs unchanged.',
+  'exhale begins — chest settling back down.',
+  'exhaling — chest lowering, tail sways a touch.',
+  'SETTLE — lowest point, body dips a hair, head tips down slightly. Feet planted.',
+  'return to rest, NEAR-IDENTICAL to FRAME 1 — loops seamlessly.',
+])}
+- ZERO horizontal drift, identical SIZE in every cell. Exactly ONE creature per cell.`,
+        walk: `WALK — four-legged creature WALKS IN PLACE, profile, head to the RIGHT, feet stay at the same horizontal position (no sliding):
+${buildFrameMap([
+  'a hind leg reaches forward and plants; diagonally opposite front leg supports.',
+  'weight transfers; body lowest; a front leg begins to lift.',
+  'mid-stride — a front leg swings forward under the chest, others support.',
+  'that front leg reaches forward and plants; body rising.',
+  'mirror of frame 1 — opposite hind leg reaches and plants.',
+  'mirror of frame 2 — weight transfers, body lowest.',
+  'mirror of frame 3 — opposite front leg swings forward.',
+  'mirror of frame 4 — that front leg plants; loops back to frame 1.',
+])}
+- A natural 4-beat walk; the near-side legs (lighter) and far-side legs (darker) stay distinguishable. Walks IN PLACE on an invisible treadmill.`,
+        run: `GALLOP — four-legged creature RUNS IN PLACE, profile, head to the RIGHT, with airborne suspension frames:
+${buildFrameMap([
+  'GATHER — all four legs bunched under the body, back rounded, body low.',
+  'hind legs drive back powerfully, front legs reach forward, body launching up.',
+  'EXTENDED SUSPENSION — all four legs stretched out, body fully airborne (off the ground), stretched long.',
+  'front legs reach down to land, hind legs trailing.',
+  'front legs plant, hind legs swing forward under the belly.',
+  'COLLECTED SUSPENSION — legs gathered under the body, airborne again, body compact.',
+  'hind legs reach forward to plant.',
+  'regather — back to the bunched gather pose; loops to frame 1.',
+])}
+- Strong forward lean, body bobs up at both airborne suspensions. Runs IN PLACE.`,
+        jump: `JUMP — four-legged creature leaps IN PLACE (vertical), profile, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'standing neutral on all fours.',
+  'CROUCH — all legs bend deeply, body lowers, gathering to spring.',
+  'LAUNCH — legs straighten explosively, body lifts, front rising first.',
+  'ASCENDING — body rising, legs tucking up under the belly.',
+  'PEAK — highest point, body compact, all legs tucked.',
+  'DESCENDING — legs extending down toward the ground.',
+  'LANDING — feet touching down, legs bending to absorb impact.',
+  'recover to the neutral all-fours stance of FRAME 1.',
+])}
+- Vertical motion only; horizontal position never changes.`,
+        pounce: `POUNCE — four-legged predator leaps FORWARD to strike, profile, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'alert low stance, eyes forward.',
+  'CROUCH & COIL — body low to the ground, haunches gathered, ready to spring.',
+  'load — weight shifts onto the hind legs, front light.',
+  'EXPLOSIVE LAUNCH — hind legs drive, body springs forward and up, front paws reaching ahead.',
+  'AIRBORNE — body stretched forward through the air, front paws extended toward the target.',
+  'descend — front paws lead down toward the strike point.',
+  'STRIKE / LAND — front paws slam down, body landing, hind legs catching up.',
+  'recover to a low crouch.',
+])}`,
+        hurt: `HURT — four-legged creature takes a hit IN PLACE, profile, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'neutral all-fours stance.',
+  'IMPACT — front rears up / head snaps back and up, body recoils away from the hit.',
+  'PEAK RECOIL — head thrown back, off-balance, legs splaying.',
+  'stagger — starting to recover, head coming back down.',
+  'settling — body returning toward level, legs re-planting.',
+  'nearly recovered.',
+  'recovered neutral stance.',
+  'hold neutral.',
+])}`,
+        death: `DEATH / COLLAPSE — four-legged creature collapses IN PLACE, profile, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'standing, taking a final hit, shock pose.',
+  'legs buckling, body sagging.',
+  'front collapsing, chest sinking toward the ground, head dropping.',
+  'chest hits the ground, hindquarters following.',
+  'rolling onto the side, legs sliding out.',
+  'legs splayed out on the ground, body limp.',
+  'settling flat onto the ground.',
+  'lying motionless on the ground — final defeated rest pose.',
+])}`,
+        sleep: `SLEEP — four-legged creature lies CURLED and asleep on the ground, profile, head to the RIGHT, slow breathing loop:
+${buildFrameMap([
+  'curled up on the ground, legs folded, tail wrapped around, head resting. Resting baseline.',
+  'gentle inhale — ribcage rises a hair.',
+  'inhaling — body swells very slightly.',
+  'peak inhale — chest fullest.',
+  'exhale begins — chest settling.',
+  'exhaling — body relaxing back down.',
+  'settle — lowest, fully relaxed.',
+  'return to the resting pose — loops seamlessly to frame 1.',
+])}
+- Very low motion; the whole body stays curled on the ground in every cell.`,
+      }
+
+      const serpentChoreography: Record<string, string> = {
+        idle: `IDLE — limbless serpent/eel/fish at rest, head to the RIGHT, only a slow gentle undulation:
+${buildFrameMap([
+  'resting in a loose, low S-curve, head raised slightly, tail to the left.',
+  'a very slight wave begins to travel along the body.',
+  'gentle undulation continues, head steady.',
+  'wave at mid-travel, body softly curved.',
+  'wave continues toward the head.',
+  'body easing back toward rest.',
+  'nearly at rest, smallest curve.',
+  'back to the resting S-curve — loops seamlessly.',
+])}
+- Very low amplitude. Body stays IN PLACE (no horizontal drift). One creature per cell.`,
+        slither: `SLITHER / SWIM — serpent moves with a traveling wave IN PLACE, head to the RIGHT:
+${buildFrameMap([
+  'a sinusoidal wave runs from tail (left) to head (right) — phase 0.',
+  'the wave has advanced one step toward the head.',
+  'wave advanced further — crests have shifted right.',
+  'wave at the halfway phase of the loop.',
+  'wave advanced — mirror-ish of frame 2.',
+  'wave advanced further.',
+  'wave nearly back to the start phase.',
+  'wave completes one full cycle — frame 8 → frame 1 loops seamlessly.',
+])}
+- The body undulates in place; the head does NOT translate across cells. Smooth flowing S-curves, consistent body thickness.`,
+        strike: `STRIKE — serpent pulls back then LUNGES the head forward, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'ready, head raised in a loose coil.',
+  'drawing the head BACK, body coiling tighter behind it.',
+  'TIGHT COIL — head pulled fully back, body loaded like a spring, mouth beginning to open.',
+  'release — body uncoiling, head beginning to shoot forward.',
+  'FULL LUNGE — head thrust far FORWARD (to the right), mouth wide open at maximum reach.',
+  'overshoot — head still forward, beginning to retract.',
+  'retracting the head back toward the body.',
+  'settled back into a ready coil.',
+])}`,
+        coil: `COIL — serpent tightens from a loose wave into a compact coil, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'loose, low S-curve.',
+  'body begins to draw in, curves tightening.',
+  'tighter — more, smaller curves forming.',
+  'coiling further, head rising over the body.',
+  'tight coil forming, head on top.',
+  'nearly fully coiled, compact.',
+  'fully coiled, head raised and alert on top of the coil.',
+  'rest in the tight coil — final pose (does not loop).',
+])}`,
+        hurt: `HURT — serpent thrashes from a hit IN PLACE, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'neutral low S-curve.',
+  'VIOLENT JOLT — body whips into a sharp, high-amplitude wave, head recoiling.',
+  'PEAK THRASH — maximum contortion, body kinked.',
+  'thrash easing, body still agitated.',
+  'settling — amplitude dropping.',
+  'nearly calm.',
+  'back toward the resting curve.',
+  'resting neutral curve.',
+])}`,
+        death: `DEATH — serpent thrashes once, goes limp and flattens onto the ground, head to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'struck, body tensing into a curve.',
+  'LAST THRASH — one violent high wave.',
+  'thrash collapsing, body losing tension.',
+  'going limp, curves loosening and lowering.',
+  'body sagging toward the ground, amplitude dropping.',
+  'nearly straight, settling flat.',
+  'almost flat along the ground.',
+  'lying straight and motionless on the ground — final dead pose.',
+])}`,
+      }
+
+      const flyerChoreography: Record<string, string> = {
+        idle: `IDLE / HOVER — winged creature hovers in place, profile, facing RIGHT, gentle wing motion (it is AIRBORNE — floating in the middle of the cell, NOT on the ground):
+${buildFrameMap([
+  'wings at mid-height, body level, gentle hover.',
+  'wings rising toward the top of a soft beat.',
+  'wings near the top, body bobbing up slightly.',
+  'wings starting back down.',
+  'wings at mid-height, body settling.',
+  'wings drooping toward the bottom of the soft beat.',
+  'wings rising again.',
+  'back to mid-height — loops seamlessly.',
+])}
+- The near wing (lighter) and far wing (darker) stay distinguishable. The body floats; it is NOT planted on a ground line.`,
+        flap: `FLY / FLAP — winged creature flies in place with a POWERFUL wing-flap loop, profile, facing RIGHT, airborne:
+${buildFrameMap([
+  'TOP of the upstroke — both wings raised HIGH above the body, body bobbed up.',
+  'wings beginning the downstroke.',
+  'mid DOWNSTROKE — wings sweeping down past horizontal.',
+  'BOTTOM of the downstroke — wings fully DOWN below the body, body dipped low.',
+  'wings beginning to lift (recovery).',
+  'mid upstroke — wings sweeping back up.',
+  'wings nearing the top again.',
+  'back to the top of the upstroke — loops seamlessly.',
+])}
+- Strong, readable flap; body bobs up on the upstroke and dips on the downstroke. Near wing lighter, far wing darker. Flies IN PLACE.`,
+        glide: `GLIDE — winged creature soars with wings HELD extended and mostly still, profile, facing RIGHT, airborne:
+${buildFrameMap([
+  'wings fully extended out to the sides, steady, body level.',
+  'only the wing tips flutter a touch; tail adjusts slightly.',
+  'body drifts up a few pixels, wings steady.',
+  'wing tips flutter, body level.',
+  'body drifts down a few pixels.',
+  'wing tips flutter, tail sways.',
+  'body easing back toward center.',
+  'steady glide — loops seamlessly.',
+])}
+- Wings stay extended the whole time (no big flap). Subtle motion only.`,
+        dive: `DIVE — winged creature tucks its wings and PLUNGES nose-down, profile, facing RIGHT, plays ONCE:
+${buildFrameMap([
+  'level flight, wings up, pulling up before the dive.',
+  'tipping over — nose dropping, wings starting to sweep back.',
+  'nose-DOWN, body angling steeply downward, wings sweeping back.',
+  'STEEP PLUNGE — body pointed down, wings tucked back tight, plummeting.',
+  'fastest descent — wings fully swept, body streamlined and low in the cell.',
+  'beginning the pull-out — wings starting to flare.',
+  'flaring the wings wide to brake.',
+  'leveling back out at the bottom, wings spread.',
+])}`,
+        hurt: `HURT — winged creature is struck in mid-air, profile, facing RIGHT, plays ONCE:
+${buildFrameMap([
+  'neutral hover.',
+  'IMPACT — body jolts up/back, wings flung wide, head snapping back.',
+  'PEAK RECOIL — body thrown back, wings splayed, off-balance.',
+  'beginning to recover, wings coming back in.',
+  'settling toward level.',
+  'nearly recovered hover.',
+  'recovered neutral hover.',
+  'hold hover.',
+])}`,
+        death: `DEATH — winged creature's wings collapse and it tumbles to the ground, profile, facing RIGHT, plays ONCE:
+${buildFrameMap([
+  'struck in mid-air, wings faltering.',
+  'wings folding, body tipping forward.',
+  'TUMBLING — wings collapsing, body rotating, beginning to fall.',
+  'upside-down fall, wings limp.',
+  'plummeting toward the ground, wings trailing.',
+  'near the ground, body crumpling.',
+  'crumpled onto the ground, wings splayed.',
+  'lying motionless on the ground — final dead pose.',
+])}
+- Across the frames the creature falls from mid-air down to the ground.`,
+      }
+
+      const blobChoreography: Record<string, string> = {
+        idle: `IDLE / PULSE — amorphous blob/slime at rest, profile, EYES to the RIGHT, only a slow breathing pulse:
+${buildFrameMap([
+  'rest — rounded blob sitting on the ground, neutral width.',
+  'pulse out — body widens and flattens a touch (squash).',
+  'fuller squash — widest/flattest of the breath.',
+  'easing back toward neutral.',
+  'neutral.',
+  'pulse in — body narrows and rises a touch (stretch).',
+  'tallest/narrowest of the breath.',
+  'back to rest — loops seamlessly.',
+])}
+- Volume looks constant (wider = flatter, taller = narrower). Stays IN PLACE on the ground. Eyes face RIGHT.`,
+        hop: `HOP — blob hops IN PLACE with squash & stretch, profile, EYES to the RIGHT:
+${buildFrameMap([
+  'resting on the ground, neutral.',
+  'ANTICIPATION — squashes down low and wide, gathering to jump.',
+  'LAUNCH — stretches tall and narrow as it springs up off the ground.',
+  'AIRBORNE — body up off the ground, slightly stretched.',
+  'APEX — highest point, body rounding out.',
+  'falling — body stretching downward.',
+  'LANDING — squashes down low and wide on impact with the ground.',
+  'settles back to neutral — loops seamlessly.',
+])}
+- Hops in place (no horizontal drift). Strong squash on the ground, stretch in the air.`,
+        bounce: `BOUNCE — blob bounces IN PLACE, a higher and snappier hop, profile, EYES to the RIGHT:
+${buildFrameMap([
+  'resting neutral.',
+  'DEEP ANTICIPATION — squashes down hard and wide.',
+  'EXPLOSIVE LAUNCH — stretches very tall and narrow, springing up.',
+  'rising through the air, stretched.',
+  'HIGH APEX — peak of a tall bounce.',
+  'fast fall, stretched downward.',
+  'HARD LANDING — strong squash on impact.',
+  'rebounds toward neutral — loops seamlessly.',
+])}
+- Bigger and faster than the hop; exaggerated squash & stretch.`,
+        lunge: `LUNGE — blob stretches FORWARD to attack, profile, EYES to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'resting neutral.',
+  'wind up — compresses and leans BACK (to the left).',
+  'peak wind-up — fully loaded back.',
+  'stretching FORWARD — body elongates to the right toward the target.',
+  'FULL LUNGE — body stretched far forward (right), pointed, attacking.',
+  'overshoot — still extended forward.',
+  'recoil — snapping back, squashing.',
+  'settles back to the neutral resting blob.',
+])}`,
+        hurt: `HURT — blob is struck IN PLACE, profile, EYES to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'neutral resting blob.',
+  'IMPACT — slammed flat and wide, pushed back, jiggling.',
+  'rebound wobble — squishes the other way.',
+  'wobble settling.',
+  'smaller wobble.',
+  'nearly settled.',
+  'back to neutral.',
+  'hold neutral.',
+])}`,
+        death: `DEATH — blob collapses and spreads into a flat puddle, profile, EYES to the RIGHT, plays ONCE:
+${buildFrameMap([
+  'struck, body shuddering upward.',
+  'losing form, beginning to sag.',
+  'sagging and spreading outward.',
+  'spreading wider, flattening.',
+  'flattening further into a low pool.',
+  'a wide, low puddle.',
+  'almost completely flat.',
+  'a flat, motionless puddle on the ground — final dead pose.',
+])}
+- Across the frames the blob flattens and spreads wider as it dies.`,
+      }
+
+      const CHOREOGRAPHY_BY_PLAN: Record<string, Record<string, string>> = {
+        biped: animChoreography,
+        quadruped: quadrupedChoreography,
+        serpent: serpentChoreography,
+        flyer: flyerChoreography,
+        blob: blobChoreography,
+      }
+      const bodyPlan =
+        typeof spriteBodyPlan === 'string' && CHOREOGRAPHY_BY_PLAN[spriteBodyPlan]
+          ? spriteBodyPlan
+          : 'biped'
+      const planChoreography = CHOREOGRAPHY_BY_PLAN[bodyPlan]
+
       const animType =
-        typeof spriteAnim === 'string' && animChoreography[spriteAnim]
+        typeof spriteAnim === 'string' && planChoreography[spriteAnim]
           ? spriteAnim
-          : 'idle'
-      const choreography = animChoreography[animType]
+          : Object.keys(planChoreography)[0]
+      const choreography = planChoreography[animType]
+
+      // Per-body-plan POSE MAP instructions. The biped's "left/right leg, depth
+      // shading" language doesn't translate to four legs, a wing pair, a single
+      // sinuous tube, or a limbless blob — so each plan describes which parts to
+      // match, how to keep overlapping parts readable, and how facing works.
+      interface PoseMapParts {
+        match: string
+        depth: string
+        sameStays: string
+        facing: string
+        footprint: string
+      }
+      const POSE_MAP_PARTS: Record<string, PoseMapParts> = {
+        biped: {
+          match:
+            'same torso lean, same hip/knee bend on each leg, same shoulder/elbow swing on each arm, same head position. The mannequin\u2019s limbs ARE the character\u2019s limbs.',
+          depth:
+            'LEFT vs RIGHT LIMBS \u2014 DEPTH SHADING (critical for walk/run; without it the two legs merge into one blob): the mannequin draws the NEAR-side limbs (leg + arm closest to camera) LIGHT and the FAR-side limbs DARK. Reproduce this as DEPTH SHADING \u2014 far arm/leg noticeably darker/in shadow, near arm/leg lighter/lit \u2014 even when both legs are the same garment color. Add a dark separation edge where the near leg overlaps the far leg. The two legs and two arms must ALWAYS stay individually distinguishable.',
+          sameStays:
+            'SAME LEG STAYS NEAR: the light (near) leg is the SAME physical leg in every cell and the dark (far) leg the SAME \u2014 do NOT swap which leg is light vs dark between frames.',
+          facing:
+            'ONE FACING: the character faces RIGHT in every cell (profile / side view), exactly like the mannequins.',
+          footprint:
+            'same horizontal center, same height (head-top to feet), same foot baseline. The mannequin already encodes \u201Cin place\u201D / no sliding (airborne frames lift the whole skeleton uniformly).',
+        },
+        quadruped: {
+          match:
+            'same spine tilt, the same bend on EACH of the four legs (front-near, front-far, hind-near, hind-far), the same neck + head position, and the same tail position. The mannequin\u2019s limbs ARE the creature\u2019s limbs.',
+          depth:
+            'FOUR LEGS \u2014 DEPTH SHADING (critical; without it the legs merge into a blob): the mannequin draws the NEAR-side legs LIGHT and the FAR-side legs DARK. Reproduce this \u2014 far legs darker/in shadow, near legs lighter/lit \u2014 even in one fur color, with a dark separation edge where legs overlap. All FOUR legs must stay individually distinguishable.',
+          sameStays:
+            'SAME LEGS STAY NEAR: the two light (near) legs are the SAME physical legs in every cell and the two dark (far) legs the SAME \u2014 do NOT swap which side is light vs dark between frames.',
+          facing:
+            'ONE FACING: the creature stays in RIGHT-facing profile (head to the right) in every cell, exactly like the mannequins.',
+          footprint:
+            'same horizontal center, same body length and standing height, same foot baseline. The mannequin encodes \u201Cin place\u201D / no sliding (airborne gallop/jump/pounce frames lift the whole body uniformly).',
+        },
+        serpent: {
+          match:
+            'the creature\u2019s body follows the SAME sinuous spine curve the grey tube shows in that cell \u2014 same wave shape, same head position. The mannequin tube IS the creature\u2019s body.',
+          depth:
+            'BODY READABILITY: keep the body ONE smooth tapered tube (thicker through the middle, thinner at the tail) with a clean dark outline so overlapping curves never merge; shade the lower/under side a little darker for form.',
+          sameStays:
+            'CONSISTENT THICKNESS: the body keeps the same thickness profile in every cell \u2014 only the curve of the wave changes.',
+          facing:
+            'ONE FACING: the HEAD is at the RIGHT end of the body in every cell (side profile), exactly like the mannequins.',
+          footprint:
+            'same body length and the same horizontal center; the body undulates IN PLACE and does not slide across cells.',
+        },
+        flyer: {
+          match:
+            'same body pitch, the same position of EACH wing (near and far), the same tail position, and the same head position. The mannequin\u2019s wings ARE the creature\u2019s wings.',
+          depth:
+            'TWO WINGS \u2014 DEPTH SHADING (critical; without it the wings merge): the mannequin draws the NEAR wing LIGHT and the FAR wing DARK. Reproduce this \u2014 far wing darker/in shadow, near wing lighter/lit \u2014 with a dark separation edge where they overlap, so BOTH wings stay individually distinguishable.',
+          sameStays:
+            'SAME WING STAYS NEAR: the light (near) wing is the SAME physical wing in every cell and the dark (far) wing the SAME \u2014 do NOT swap which wing is light vs dark between frames.',
+          facing:
+            'ONE FACING: the creature faces RIGHT (head to the right) and stays AIRBORNE \u2014 floating around the middle of the cell, NOT standing on a ground line.',
+          footprint:
+            'same horizontal center, same body size and wingspan, floating at the same in-cell height the mannequin shows (the mannequin lifts uniformly between frames \u2014 follow it).',
+        },
+        blob: {
+          match:
+            'match the SAME silhouette the grey mannequin shows in that cell \u2014 the same squash/stretch shape, the same width and height, the same lean. The mannequin\u2019s outline IS the creature\u2019s outline.',
+          depth:
+            'VOLUME: keep ONE smooth blob silhouette with a clean dark outline and a soft highlight on the upper surface so it reads as a rounded 3D volume, not a flat shape.',
+          sameStays:
+            'CONSISTENT VOLUME: the blob looks like the same amount of material in every cell \u2014 wider means flatter, taller means narrower \u2014 never a different-sized creature.',
+          facing:
+            'ONE FACING: the EYES face RIGHT in every cell to establish facing (side profile).',
+          footprint:
+            'same horizontal center; the blob rests on the same ground baseline and does not slide across cells (airborne hop/bounce frames lift the whole body uniformly).',
+        },
+      }
+      const poseParts = POSE_MAP_PARTS[bodyPlan] ?? POSE_MAP_PARTS.biped
 
       const hasGuide =
         typeof spriteGuideImage === 'string' &&
@@ -495,16 +987,16 @@ ${
 }
 
 HOW TO USE THE POSE MAP — every one of these is mandatory:
-- MATCH THE POSE EXACTLY: In each output cell, pose the character so its skeleton lines up with that cell's mannequin — same torso lean, same hip/knee bend on each leg, same shoulder/elbow swing on each arm, same head position. The mannequin's limbs ARE the character's limbs. Do NOT invent your own pose; do NOT default to a neutral standing pose.
-- LEFT vs RIGHT LIMBS — DEPTH SHADING (this is CRITICAL for walk/run; without it the two legs merge into one black blob and the cycle is unreadable): The mannequin draws the NEAR-side limbs (the leg and arm closest to the camera) in a LIGHT grey and the FAR-side limbs (behind the body) in a DARK grey. You MUST reproduce this as DEPTH SHADING on the character: render the far-side arm and far-side leg noticeably DARKER / in shadow, and the near-side arm and near-side leg LIGHTER / fully lit — even when both legs are the same garment color (e.g. black trousers), the far leg is a darker shade of that color and the near leg a lighter shade. Add a subtle dark separation edge where the near leg overlaps the far leg so they never blend together. The two legs and two arms must ALWAYS be individually distinguishable.
-- SAME LEG STAYS NEAR: The light (near) leg is the SAME physical leg in all ${frames} cells, and the dark (far) leg is the SAME physical leg in all cells — exactly as the pose map shows. Do NOT swap which leg is shaded light vs dark between frames. The legs swing forward and back through the cycle, but the near leg is always the lighter one and the far leg always the darker one, so the eye can track each leg cleanly across the animation.
-- DO NOT DRAW THE MANNEQUIN: The grey skeleton is scaffolding only. Replace it with the fully-drawn character (skin, outfit, weapon). No grey sticks, joints, or dots in the final image — but DO keep its light-near / dark-far shading.
-- ONE FACING: The character faces RIGHT in every cell (profile / side view), exactly like the mannequins.
-- POSITION & SCALE: The character occupies the SAME footprint as the mannequin in each cell — same horizontal center, same height (head-top to feet), same foot baseline. The mannequin already encodes "in place" / no horizontal sliding and a consistent baseline (airborne frames lift the whole skeleton uniformly). Follow it.
-- IDENTITY: Every cell is the SAME character — ${hasIdentity ? 'the one in IMAGE 1' : 'consistent across all cells'}: same outfit, colors, hair, weapon, proportions, face. ONLY the pose changes between cells.
-- BACKGROUND: Outside the character silhouette, every pixel is flat pure magenta ${KEY_COLOR_HEX}. No grid lines, no cell borders, no leftover grey.
+- MATCH THE POSE EXACTLY: In each output cell, pose the creature so it lines up with that cell's mannequin — ${poseParts.match} Do NOT invent your own pose; do NOT default to a neutral resting pose.
+- ${poseParts.depth}
+- ${poseParts.sameStays}
+- DO NOT DRAW THE MANNEQUIN: The grey mannequin is scaffolding only. Replace it with the fully-drawn creature (skin, fur, scales, feathers, outfit). No grey sticks, joints, or dots in the final image — but DO keep its light-near / dark-far shading.
+- ${poseParts.facing}
+- POSITION & SCALE: The creature occupies the SAME footprint as the mannequin in each cell — ${poseParts.footprint} Follow it.
+- IDENTITY: Every cell is the SAME creature — ${hasIdentity ? 'the one in IMAGE 1' : 'consistent across all cells'}: same colors, markings, proportions, features. ONLY the pose changes between cells.
+- BACKGROUND: Outside the creature silhouette, every pixel is flat pure magenta ${KEY_COLOR_HEX}. No grid lines, no cell borders, no leftover grey.
 
-The choreography text below NAMES each pose so you understand the motion, but the POSE MAP is the authority on the exact joint configuration for each frame. When in doubt, trust the mannequin.`
+The choreography text below NAMES each pose so you understand the motion, but the POSE MAP is the authority on the exact configuration for each frame. When in doubt, trust the mannequin.`
         : hasGuide
         ? `
 
@@ -522,20 +1014,29 @@ CRITICAL — DO NOT JUST COPY THE GUIDE:
 The guide shows the character in the SAME NEUTRAL POSE in all ${frames} cells. You are NOT being asked to reproduce that. Your job is to REPLACE THE POSE in each cell with the choreography pose described below, WHILE preserving position, scale, baseline, identity, and background EXACTLY. If your output shows the same neutral pose in every cell, you have failed the task — read the choreography section and use the prescribed pose for each cell.`
         : ''
 
-      fullPrompt = `You are generating a single SPRITE-SHEET IMAGE: a ${cols}×${rows} grid of ${frames} animation keyframes for a 2D side-view game character. Each grid cell is exactly ${cellPx}×${cellPx} pixels. The full sheet is exactly ${cols * cellPx}×${rows * cellPx} pixels.${guideBlock}
+      fullPrompt = `You are generating a single SPRITE-SHEET IMAGE: a ${cols}×${rows} grid of ${frames} animation keyframes for a 2D side-view game character. Each grid cell is exactly ${cellPx}×${cellPx} pixels. The full sheet is exactly ${cols * cellPx}×${rows * cellPx} pixels, a WIDE ${cols * cellPx}:${rows * cellPx} canvas — NOT a square canvas and NOT a screenshot/mockup containing a smaller sheet.${guideBlock}
 
 GRID LAYOUT (single most important rule — read it twice):
 - The output is ONE IMAGE containing ${frames} separate frames laid out as ${cols} columns × ${rows} rows.
 - Reading order is ROW-MAJOR: top-left cell is FRAME 1, then left-to-right across the top row, then left-to-right across the next row. Concretely: (col=0, row=0)=FRAME 1, (col=1, row=0)=FRAME 2, ..., (col=${cols - 1}, row=0)=FRAME ${cols}, then (col=0, row=1)=FRAME ${cols + 1}, ..., (col=${cols - 1}, row=${rows - 1})=FRAME ${frames}.
 - EACH CELL CONTAINS EXACTLY ONE FRAME of the animation, fully drawn inside that cell. Do NOT draw multiple poses in one cell. Do NOT draw the character spanning multiple cells. Do NOT draw a film-strip with sprocket holes — there are NO visible cell borders, gridlines, frame numbers, frame labels, or separators between cells in the output.
 - EXACTLY ONE SINGLE CHARACTER PER CELL — this is the most important rule. Each cell shows ONE figure, centered. NEVER paint the character twice in the same cell: no twin, no clone, no duplicate, no mirror image, no reflection, no shadow-copy, no "before/after" pair, no second figure standing beside the main one. If you find yourself about to place a second character next to the first inside one cell, STOP — that is the single worst possible error for this task. One cell = one character.
+- HARD CELL BOUNDARIES: each ${cellPx}×${cellPx} cell is a CLIPPING BOX. The creature in a cell must stay fully inside that cell. No head, tail, wing, leg, body, shadow, fur, or motion shape may cross into the neighbouring cell above, below, left, or right.
+- MAGENTA GUTTER: leave at least ~8% of the cell as flat magenta margin around the creature inside every cell. For long creatures (wolves, snakes, birds with wings), scale the creature DOWN so the entire nose-to-tail / wingtip-to-wingtip silhouette fits comfortably inside one cell. Never crop a creature at the cell edge.
 - The MAGENTA background is CONTINUOUS across the whole sheet wherever the character isn't drawn. There is no white line, dark line, or pink stripe between cells.
+
+ONE CONTINUOUS ANIMATION (critical — do NOT split the sheet into two animations):
+- All ${frames} cells are a SINGLE cycle of ONE motion: ${animType.toUpperCase()}. They are NOT two separate animations and NOT two different gaits. The cells flow 1 → ${frames} as one smooth progression, and frame ${frames} loops back into frame 1.
+- The bottom row (cells ${cols + 1}–${frames}) is the CONTINUATION of the SAME cycle as the top row (cells 1–${cols}) — identical motion type, identical energy, identical forward lean, identical stride length and scale. It is the SECOND HALF of one animation, not a calmer second animation.
+- NEVER render the top row as one motion (e.g. a fast run/gallop) and the bottom row as a different, slower motion (e.g. a walk or a stand). If the requested animation is ${animType.toUpperCase()}, EVERY one of the ${frames} cells — top row AND bottom row — must clearly be the SAME ${animType.toUpperCase()} motion at the SAME intensity.
+- Use the per-frame choreography below for the exact pose of each numbered cell, including the bottom-row cells; those are mid-cycle poses of the SAME motion, not a second gait.
 
 FRAME ALIGNMENT (this kills "flicker"):
 - SAME BASELINE — the character's FEET sit on the SAME horizontal line in every cell. ${hasGuide ? 'Match the guide image\'s foot baseline pixel-for-pixel.' : 'Imagine drawing one straight horizontal line across the whole sheet at the character\'s foot level; every frame\'s feet touch that line.'} (For airborne frames in jump/run, the feet are above the line by the SAME amount each time, not at random heights.)
 - SAME EYE LEVEL — the character's HEAD/EYES sit at the SAME horizontal line in every cell (with small natural variation from breathing or crouching, never more than ~10% of cell height).
 - SAME SCALE — the character occupies the SAME vertical extent (head-top to feet) in every cell. Do NOT draw the character larger or smaller in different cells.
 - SAME HORIZONTAL POSITION — the character's CENTER sits at the SAME relative horizontal position inside its cell across all frames. The character does NOT slide left or right across cells. Animations like walk and run are STATIONARY / "in place" — treat the character as if on an invisible treadmill. There is exactly ONE character centered in each cell — never a left-and-right pair of figures.
+- CELL-SAFE SCALE — the complete silhouette must remain inside the same ${cellPx}×${cellPx} cell in every frame, with a magenta gutter. If a pose is long (quadruped tail/head, serpent body, wing span), make it smaller rather than letting it cross the hidden grid boundary.
 - IDENTICAL CHARACTER — same outfit, same colors, same silhouette, same proportions, same head, same hair, same weapon in every cell. ONLY the pose changes.
 
 BACKGROUND (every cell, no exceptions):
@@ -719,7 +1220,12 @@ ${
           },
         ],
         modalities: ['image', 'text'],
-        image_config: width === height ? { aspect_ratio: '1:1' } : undefined,
+        // GPT image models are especially literal about the requested canvas
+        // aspect. If omitted, OpenRouter/model defaults can come back square;
+        // the client then normalizes that square into e.g. a 2048×1024 sprite
+        // sheet, visually stretching every frame. Always send the intended
+        // reduced aspect ratio (sprites are 2:1, square anchors are 1:1).
+        image_config: { aspect_ratio: supportedAspectRatioForSize(width, height) },
         max_tokens: 2000,
         // Low temperature on multi-cell sheet generation keeps the model
         // disciplined about the grid layout + per-cell consistency.

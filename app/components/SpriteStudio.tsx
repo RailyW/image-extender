@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icons } from '@/app/components/icons'
 import { ART_STYLE_GROUPS } from '@/app/lib/artStyles'
-import { SPRITE_ANIMATIONS, SPRITE_ANIM_ORDER, SPRITE_CHARACTER_PRESETS, SPRITE_FRAME_COUNT, SPRITE_FRAME_SIZE, SPRITE_SHEET_H, SPRITE_SHEET_W, SpriteAnimType, SpriteFrame, SpriteSheet } from '@/app/lib/sprite'
+import { SPRITE_ANIMATIONS, SPRITE_FRAME_COUNT, SPRITE_FRAME_SIZE, SPRITE_SHEET_H, SPRITE_SHEET_W, SpriteAnimType, SpriteFrame, SpriteSheet } from '@/app/lib/sprite'
+import { BODY_PLANS, BODY_PLAN_ORDER, BodyPlan } from '@/app/lib/bodyPlans'
 
 export function SpriteAnimationPlayer({
   frames,
@@ -342,6 +343,8 @@ export function SpriteFrameCell({
 export function SpriteStudio({
   sheet,
   anchor,
+  bodyPlan,
+  setBodyPlan,
   selectedAnim,
   setSelectedAnim,
   generatedAnims,
@@ -370,6 +373,8 @@ export function SpriteStudio({
     prompt: string
     uploaded?: boolean
   } | null
+  bodyPlan: BodyPlan
+  setBodyPlan: (v: BodyPlan) => void
   selectedAnim: SpriteAnimType
   setSelectedAnim: (v: SpriteAnimType) => void
   generatedAnims: Set<SpriteAnimType>
@@ -413,15 +418,49 @@ export function SpriteStudio({
       <div className="flex items-center justify-center gap-2 text-[12px]">
         <Icons.Play size={12} className="text-[color:var(--accent)]" />
         <span style={{ color: 'var(--text-secondary)' }}>
-          Sprite mode — two-pass workflow. Pass 1 generates a character
-          anchor; Pass 2 paints all 8 keyframes with the anchor as visual
-          reference. Re-use the same character across multiple animations.
+          Sprite mode — pick a body plan, then an animation. Pass 1 generates a
+          character anchor; Pass 2 paints all 8 keyframes onto a deterministic
+          pose map. Re-use the same character across multiple animations.
         </span>
       </div>
 
-      {/* Animation type picker — chip strip */}
+      {/* Body-plan picker — chip strip. Switching plan swaps the pose rig, the
+          available animations, and the starter presets. */}
       <div className="flex flex-wrap items-center justify-center gap-1.5">
-        {SPRITE_ANIM_ORDER.map((animType) => {
+        <span
+          className="mr-1 text-[11px] font-medium uppercase tracking-wider"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          Body plan
+        </span>
+        {BODY_PLAN_ORDER.map((planId) => {
+          const plan = BODY_PLANS[planId]
+          const active = bodyPlan === planId
+          return (
+            <button
+              key={planId}
+              type="button"
+              onClick={() => setBodyPlan(planId)}
+              disabled={generating}
+              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium transition-colors"
+              style={{
+                border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                background: active ? 'var(--accent-bg)' : 'var(--bg-elev)',
+                color: active ? 'var(--accent)' : 'var(--text-secondary)',
+                cursor: generating ? 'not-allowed' : 'pointer',
+                opacity: generating ? 0.5 : 1,
+              }}
+              title={plan.hint}
+            >
+              {plan.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Animation type picker — chip strip (scoped to the current body plan) */}
+      <div className="flex flex-wrap items-center justify-center gap-1.5">
+        {BODY_PLANS[bodyPlan].anims.map((animType) => {
           const animSpec = SPRITE_ANIMATIONS[animType]
           const active = selectedAnim === animType
           const hasSaved = generatedAnims.has(animType) && !active
@@ -756,7 +795,7 @@ export function SpriteStudio({
           </div>
 
           <div className="flex flex-wrap gap-1.5">
-            {SPRITE_CHARACTER_PRESETS.map((preset) => {
+            {BODY_PLANS[bodyPlan].presets.map((preset) => {
               const active = prompt.trim() === preset.prompt
               return (
                 <button

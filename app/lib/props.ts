@@ -106,6 +106,49 @@ export function nextPropId(): string {
   return `p${Date.now().toString(36)}_${__propSeq}`
 }
 
+/** Slugify a prop name into a filesystem-safe stem (lowercase, _-joined). */
+function slugifyPropName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40)
+}
+
+/**
+ * Resolve descriptive, collision-free file names for a list of props, in order.
+ *
+ * Each prop already carries the art director's `name` (the kind it decided to
+ * paint, e.g. "lantern"), so we don't need to ask the image model for names —
+ * we reuse that. The file stem is the slugified name (`lantern.png`); repeats
+ * of the same kind get a numeric suffix (`lantern_02.png`). Props with no name
+ * fall back to the positional `prop_NNN.png`. Returns `{ name, file }` per prop.
+ */
+export function resolvePropNames(
+  props: Array<{ name?: string }>
+): Array<{ name: string; file: string }> {
+  const slugs = props.map((p) => (p.name ? slugifyPropName(p.name) : ''))
+  // How often each slug occurs overall, so we only suffix the ones that repeat.
+  const totals = new Map<string, number>()
+  slugs.forEach((s) => {
+    if (s) totals.set(s, (totals.get(s) ?? 0) + 1)
+  })
+  const seen = new Map<string, number>()
+  return props.map((p, i) => {
+    const slug = slugs[i]
+    if (!slug) {
+      return {
+        name: `prop ${i + 1}`,
+        file: `prop_${String(i + 1).padStart(3, '0')}.png`,
+      }
+    }
+    const n = (seen.get(slug) ?? 0) + 1
+    seen.set(slug, n)
+    const suffix = (totals.get(slug) ?? 1) > 1 ? `_${String(n).padStart(2, '0')}` : ''
+    return { name: (p.name as string).trim(), file: `${slug}${suffix}.png` }
+  })
+}
+
 /** Grid geometry for packing `count` props into an atlas `cols` wide. */
 export function propAtlasLayout(count: number, cols: number = PROP_ATLAS_COLS) {
   const c = Math.max(1, cols)

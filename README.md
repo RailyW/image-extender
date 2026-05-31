@@ -41,10 +41,11 @@ in the top bar:
   sprite-sheet, with deterministic corner reconciliation and an AI "art
   director" QA/repaint loop. Palette and texture detail stay locked across the
   whole set.
-- **Sprite Studio** — character animations as a single AI-call sheet. Pick an
-  animation (idle / walk / run / jump / attack / hurt / death), describe the
-  character, get a keyframe sheet back with a live animation player, an AI QA
-  pass, and engine-ready export.
+- **Sprite Studio** — character & creature animations as a single AI-call sheet.
+  Pick a **body plan** (humanoid, quadruped, serpent/fish, flyer/bird, or blob),
+  pick an animation, describe the creature, and get a keyframe sheet back with a
+  live animation player and engine-ready export. Each body plan drives its own
+  anatomy-specific pose-guide rig and animation set.
 - **Props Studio** — an open-ended, ever-growing library of standalone
   transparent **decoration sprites** (the kind games layer on top of the tile
   map) generated 8 at a time, driven by a two-call "art director → painter"
@@ -192,28 +193,52 @@ in the top bar:
   - The anchor **persists across animation switches**, so the same character can
     be re-used for idle → walk → run → jump → attack without re-rolling
     identity. A `Re-roll character` button discards the anchor for a fresh one.
-- **Pose-rig guide.** A skeletal pose guide sheet is drawn for the chosen action
-  and fed in as structural reference, so per-frame choreography is consistent.
-- **AI "Art Director" QA/repaint loop.** The composed sheet + anchor are handed
-  to a *vision* critic acting as a senior game animator, with per-animation
-  acceptance criteria. It rejects identity flicker, scale/baseline drift,
-  fringe, broken anatomy, an incoherent cycle, or a failed chroma key — and
-  returns a fix report that drives a repaint while keeping the locked identity.
-- **Deterministic twin detector.** A pixel-analysis pass scans each cell's
-  alpha for two characters in one frame (a common multi-panel failure) and
-  forces a repaint if it finds duplicates, even when the vision critic misses
-  them.
-- **Baseline & horizontal alignment.** Frames are foot-baseline aligned (median
-  baseline, airborne frames respected) and horizontally centered so playback
-  doesn't bounce or slide.
-- **7 stock animations.** Idle (loop), Walk (loop), Run (loop), Jump (one shot),
-  Attack (one shot), Hurt (one shot), Death (one shot) — each with tuned
-  per-frame choreography and a sensible default FPS.
+- **Five body plans.** A humanoid skeleton can't drive a galloping wolf, a
+  slithering eel, a flapping bird, or a bouncing slime — so Sprite mode branches
+  on anatomy. Pick a **body plan** and the studio swaps in the matching pose rig,
+  animation set, starter creatures, and QA expectations, while reusing the same
+  anchor → sheet → align → export pipeline:
+  - **Humanoid** (biped) — knights, mages, goblins, bosses.
+  - **Quadruped** — wolves, big cats, horses, hounds, plus everyday animals
+    (dog, cat, cow, deer, bear, fox, pig, goat).
+  - **Serpent / Fish** — snakes, eels, and marine life (shark, clownfish,
+    pufferfish, anglerfish, swordfish, dolphin, sea serpent, piranha).
+  - **Flyer / Bird** — birds, bats, wyverns, fairies, phoenix.
+  - **Blob** — slimes, oozes, elementals, ghosts (pure squash & stretch).
+- **Anatomy-specific pose-guide rigs.** Each body plan ships a deterministic,
+  code-generated pose-guide sheet (a "ControlNet-style" mannequin) drawn fresh
+  for the chosen action and fed in as structural reference. Rigs use near/far
+  value separation + dark outlines so overlapping limbs stay readable, and they
+  render real anatomy — a quadruped spine + 4 legs with a head-bob gait, a
+  serpent spine wave with an open-jaw strike, filled bird **wing membranes**
+  with a proper flap/dive, and blob squash-&-stretch arcs.
+- **Deterministic twin detector.** A pixel-analysis pass scans each cell's alpha
+  for two creatures in one frame (a common multi-panel failure), including a
+  morphological-opening step that splits *fused* duplicates, and forces a
+  repaint when it finds them. Sprite generation leans on these deterministic
+  checks rather than a vision critic, so it isn't blocked waiting on a QA model.
+- **Scale normalization.** The model redraws the creature at a slightly
+  different size in every cell, so the silhouette "breathes" during playback.
+  A pass measures each frame's tight silhouette (bbox diagonal), takes the
+  median as the intended scale, and rescales each frame toward it — within a
+  tolerance + clamp so genuine pose extension (a run reach, an attack lunge)
+  keeps its shape.
+- **Baseline & horizontal alignment.** Frames are foot-baseline aligned to one
+  shared in-cell floor and horizontally centered so playback doesn't bounce or
+  slide. Grounded gaits (idle / walk / **run**) plant *every* frame on the floor
+  line; only truly ballistic actions (jump, pounce) keep their airborne lift via
+  a rigid shift, so a galloping run can't split into a high row and a low row.
+- **Per-body-plan animation sets.** Humanoid: idle / walk / run / jump / attack /
+  hurt / death. Quadruped: idle / walk / run / jump / pounce / hurt / death /
+  sleep. Serpent: idle / slither / strike / coil / hurt / death. Flyer: idle /
+  flap / glide / dive / hurt / death. Blob: idle / hop / bounce / lunge / hurt /
+  death — each with tuned choreography and a sensible default FPS.
 - **Live animation player.** Looping / one-shot playback at the anim's native
   FPS with play/pause and a frame scrubber; the FPS slider tunes the feel before
   exporting.
-- **Character preset chips.** One-click archetypes (knight, ninja, wizard,
-  archer, rogue, robot, slime, dragon, skeleton, villager) seed the prompt.
+- **Creature preset chips.** One-click archetypes per body plan seed the prompt
+  (humanoid knight/ninja/wizard…, quadruped wolf/bear/cat…, marine shark/koi…,
+  flyer hawk/wyvern…, blob slime/ooze…).
 - **Engine-ready export.** Download the grid sheet, a horizontal strip
   (preferred by Phaser / Unity 2D / Godot / Defold), or a ZIP with both sheets,
   one PNG per frame, and a `manifest.json` listing FPS, loop flag, frame size,
@@ -243,21 +268,31 @@ in the top bar:
 - **8 biome presets** — forest glade, glowing cave, desert oasis, snowy peaks,
   volcanic, jungle ruins, misty swamp, candy land — these set palette/mood only,
   never specific items, so the model stays free to invent.
+- **Descriptive names in the manifest.** Because the art director already named
+  each prop (the kind it decided to paint), the export uses that instead of
+  anonymous `prop_001`: the manifest carries a human `name` per prop and the
+  files are named after it (`lantern.png`, `mushroom.png`, with `_02`/`_03`
+  suffixes on repeats), so the atlas is self-documenting in your engine.
 - **Atlas + ZIP export.** Export the whole library as a packed transparent atlas
   PNG with a JSON manifest, or a ZIP of individual transparent PNGs + atlas +
   manifest.
 
 ## The AI "Art Director" QA pattern
 
-Tiles, Sprites, and Props all share a two-call reasoning-vs-rendering pattern
-that consistently beats a single blind generation:
+Tiles and Props share a two-call reasoning-vs-rendering pattern that
+consistently beats a single blind generation:
 
 - **Props** run it *forward*: a reasoning model decides **what** to make, then
   the image model renders it.
-- **Tiles & Sprites** run it *in reverse*: the image model generates first, then
-  a vision model reviews the composited result and, if needed, sends a concise
-  fix report back for a repaint — with keep-best selection so the loop can only
-  improve the output.
+- **Tiles** run it *in reverse*: the image model generates first, then a vision
+  model reviews the composited result and, if needed, sends a concise fix report
+  back for a repaint — with keep-best selection so the loop can only improve the
+  output. (The review is auto-skipped on slow models like GPT image to avoid
+  multi-minute blind waits.)
+- **Sprites** lean on **deterministic** post-process checks instead of a vision
+  critic — scale normalization, baseline grounding, horizontal centering, and a
+  pixel-level twin/spillover detector that forces a repaint on duplicates. This
+  keeps sprite generation fast and predictable rather than blocked on a QA model.
 
 Critics are scoped to defects the painter can actually fix, run at low
 temperature for consistency, and fail-open (a flaky critic never blocks you).
@@ -351,8 +386,9 @@ include a client-provided one.
 | **Generate a tile set** | Describe the material, click generate — one AI call, auto corner-reconcile + QA review |
 | **Re-roll one tile** | Click the spark on a single tile cell (re-reconciles corners after) |
 | **Export tile set** | Atlas (with extrude padding) + per-tile PNGs + manifest |
-| **Pick a sprite animation** | Click `Idle` / `Walk` / `Run` / `Jump` / `Attack` / `Hurt` / `Death` chips |
-| **Lock a sprite character** | Pick a starter chip (or describe one), click `Lock character + <anim>` — runs both passes + QA |
+| **Pick a sprite body plan** | Choose `Humanoid` / `Quadruped` / `Serpent / Fish` / `Flyer / Bird` / `Blob` — swaps the rig, anim set, and presets |
+| **Pick a sprite animation** | Click an animation chip (the set depends on the body plan) |
+| **Lock a sprite character** | Pick a starter chip (or describe one), click `Lock character + <anim>` — runs both passes |
 | **Re-roll a sprite anim / character** | `Re-roll <anim>` runs Pass 2 only (identity preserved); `Re-roll character` runs both from scratch |
 | **Play / pause sprite, adjust FPS** | Play button + scrubber under the live player; drag the `FPS` slider |
 | **Export sprite project** | `Sheets + manifest` for grid + strip PNGs, or `ZIP` for everything |
@@ -373,9 +409,10 @@ Optional custom prompt and art style live in the bottom command bar.
 - **[OpenRouter](https://openrouter.ai)** for model access
   - Image: `google/gemini-3.1-flash-image-preview` (Nano Banana 2, default),
     `google/gemini-3-pro-image-preview` (Nano Banana Pro),
-    `google/gemini-2.5-flash-image` (Nano Banana)
-  - Reasoning / vision QA (scene brief, prop art director, tile & sprite
-    review): `google/gemini-2.0-flash-001`
+    `google/gemini-2.5-flash-image` (Nano Banana), and
+    `openai/gpt-5.4-image-2` (GPT-5.4 Image 2 — high fidelity, slower)
+  - Reasoning / vision QA (scene brief, prop art director, tile review):
+    `google/gemini-2.0-flash-001`
 
 ## Project structure
 
@@ -397,10 +434,14 @@ app/
 ├── lib/                       Domain logic & constants
 │   ├── app.ts / models.ts / artStyles.ts
 │   ├── parallax.ts / tileset.ts / sprite.ts / props.ts
+│   └── bodyPlans.ts           Sprite body-plan registry (anims, presets, rigs)
 ├── utils/
 │   ├── imageProcessor.ts      Canvas: chunking, Poisson blend, chroma key,
-│   │                          tileability, seam scoring, sprite alignment
-│   └── poseRig.ts             Skeletal pose-guide sheets for sprite frames
+│   │                          tileability, seam scoring, sprite align/scale
+│   ├── poseRig.ts             Dispatches to the body-plan rig + measures subject
+│   ├── rigCore.ts             Shared rig primitives (capsule/dot/projection…)
+│   └── rigs/                  Per-body-plan pose rigs (biped, quadruped,
+│                              serpent, flyer, blob)
 ├── globals.css                Dark "studio" design system
 ├── layout.tsx                 Root layout, Inter font
 └── page.tsx                   App shell: state, generation pipelines, QA loops

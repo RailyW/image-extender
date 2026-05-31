@@ -1,6 +1,7 @@
 'use client'
 
 export type SpriteAnimType =
+  // ── Biped humanoid ──────────────────────────────────────────────────────
   | 'idle'
   | 'walk'
   | 'run'
@@ -8,6 +9,21 @@ export type SpriteAnimType =
   | 'attack'
   | 'hurt'
   | 'death'
+  // ── Quadruped extras ────────────────────────────────────────────────────
+  | 'pounce'
+  | 'sleep'
+  // ── Serpent / fish ──────────────────────────────────────────────────────
+  | 'slither'
+  | 'strike'
+  | 'coil'
+  // ── Flyer / bird ────────────────────────────────────────────────────────
+  | 'flap'
+  | 'glide'
+  | 'dive'
+  // ── Blob / amorphous ────────────────────────────────────────────────────
+  | 'hop'
+  | 'bounce'
+  | 'lunge'
 
 
 export const SPRITE_FRAME_SIZE = 512
@@ -104,6 +120,113 @@ export const SPRITE_ANIMATIONS: Record<SpriteAnimType, SpriteAnimSpec> = {
     hint: 'Collapse to ground · 8 frames @ 10 FPS',
     keyframeChoreography:
       'Side-view 8-frame death / collapse animation, character facing RIGHT. Frame 1: standing, body taking a final hit, slight shock pose. Frame 2: knees buckling, body sagging downward. Frame 3: dropping to one knee, body folding forward. Frame 4: both knees on ground, torso slumping. Frame 5: falling sideways, torso tilting toward the ground. Frame 6: nearly horizontal, one arm reaching out to break the fall. Frame 7: on the ground, body settling, last twitches. Frame 8: lying motionless on the ground, fully collapsed, character defeated. NOT a loop — the final frame is the resting "dead" pose.',
+  },
+
+  // ── Quadruped extras ──────────────────────────────────────────────────────
+  pounce: {
+    type: 'pounce',
+    label: 'Pounce',
+    defaultFps: 12,
+    loop: false,
+    hint: 'Crouch → leap → strike · 8 frames @ 12 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame quadruped pounce, facing RIGHT. Crouch low and coil, explosive leap forward and up, airborne reach with front paws extended, land with front paws striking down, recover. Plays once.',
+  },
+  sleep: {
+    type: 'sleep',
+    label: 'Sleep',
+    defaultFps: 4,
+    loop: true,
+    hint: 'Curled resting breath loop · 8 frames @ 4 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame quadruped sleep loop, facing RIGHT. The creature lies curled on the ground, only the ribcage rising and falling with slow breathing. Very low motion; frame 8 loops back to frame 1.',
+  },
+
+  // ── Serpent / fish ────────────────────────────────────────────────────────
+  slither: {
+    type: 'slither',
+    label: 'Slither',
+    defaultFps: 12,
+    loop: true,
+    hint: 'Traveling-wave glide loop · 8 frames @ 12 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame serpent slither/swim loop, head to the RIGHT. A smooth sinusoidal wave travels from tail to head, advancing one phase step per frame so frame 8 loops seamlessly back to frame 1. Body moves in place (no horizontal drift).',
+  },
+  strike: {
+    type: 'strike',
+    label: 'Strike',
+    defaultFps: 14,
+    loop: false,
+    hint: 'Coil → lunge → recoil · 8 frames @ 14 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame serpent strike, head to the RIGHT. Pull head back into a tight coil, then lunge the head forward fast (mouth open at full extension), then retract back to a ready coil. Plays once.',
+  },
+  coil: {
+    type: 'coil',
+    label: 'Coil',
+    defaultFps: 10,
+    loop: false,
+    hint: 'Settle into a tight coil · 8 frames @ 10 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame serpent coil, head to the RIGHT. The body tightens from a loose wave into a compact coil with the head raised on top. Plays once and rests coiled.',
+  },
+
+  // ── Flyer / bird ──────────────────────────────────────────────────────────
+  flap: {
+    type: 'flap',
+    label: 'Fly',
+    defaultFps: 12,
+    loop: true,
+    hint: 'Powered wing-flap loop · 8 frames @ 12 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame flyer flap loop, facing RIGHT. Both wings sweep from a high raised position down through a powerful downstroke and back up, the body bobbing slightly with each beat. Frame 8 loops back to frame 1.',
+  },
+  glide: {
+    type: 'glide',
+    label: 'Glide',
+    defaultFps: 8,
+    loop: true,
+    hint: 'Wings held, gentle sway · 8 frames @ 8 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame flyer glide loop, facing RIGHT. Wings held extended and mostly still with only subtle tip flutter and tail adjustments; the body drifts up and down a few pixels. Frame 8 loops back to frame 1.',
+  },
+  dive: {
+    type: 'dive',
+    label: 'Dive',
+    defaultFps: 14,
+    loop: false,
+    hint: 'Wings swept, plunge down · 8 frames @ 14 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame flyer dive, facing RIGHT. Wings tuck/sweep back, body pitches nose-down and plunges, then flares the wings to pull out at the bottom. Plays once.',
+  },
+
+  // ── Blob / amorphous ──────────────────────────────────────────────────────
+  hop: {
+    type: 'hop',
+    label: 'Hop',
+    defaultFps: 10,
+    loop: true,
+    hint: 'Squash → launch → land loop · 8 frames @ 10 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame blob hop loop, facing RIGHT (eyes to the right). Squash down, stretch tall on launch, airborne stretch, squash on landing, settle — looping. In place (no horizontal drift).',
+  },
+  bounce: {
+    type: 'bounce',
+    label: 'Bounce',
+    defaultFps: 12,
+    loop: true,
+    hint: 'Energetic squash-and-stretch loop · 8 frames @ 12 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame blob bounce loop, facing RIGHT. A higher, snappier version of the hop with stronger squash-and-stretch and a higher airborne arc. Frame 8 loops back to frame 1.',
+  },
+  lunge: {
+    type: 'lunge',
+    label: 'Lunge',
+    defaultFps: 12,
+    loop: false,
+    hint: 'Stretch forward attack · 8 frames @ 12 FPS',
+    keyframeChoreography:
+      'Side-view 8-frame blob lunge attack, facing RIGHT. Pull back and compress, then stretch the body forward toward the right in a sharp attack, then snap back to a resting blob. Plays once.',
   },
 }
 

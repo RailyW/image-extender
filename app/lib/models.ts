@@ -17,6 +17,13 @@ export type ModelOption = {
 
 export const MODELS: ModelOption[] = [
   {
+    value: 'openai/gpt-5.4-image-2',
+    label: 'GPT-5.4 Image 2',
+    hint: 'OpenAI · high fidelity · slower',
+    maxAttempts: 1,
+    approxSecondsPerCall: 240,
+  },
+  {
     value: 'google/gemini-3-pro-image-preview',
     label: 'Gemini 3 Pro Image',
     hint: 'Nano Banana Pro · highest fidelity',
@@ -48,6 +55,10 @@ export function getModelConfig(value: string): ModelOption {
     MODELS.find((m) => m.value === DEFAULT_MODEL) ||
     MODELS[0]
   )
+}
+
+export function skipsArtDirectorReview(value: string): boolean {
+  return value.toLowerCase().startsWith('openai/gpt-')
 }
 
 

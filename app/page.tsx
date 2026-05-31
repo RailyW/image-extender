@@ -13,12 +13,13 @@ import { ResultActions, VariantSelector } from '@/app/components/VariantSelector
 import { Workspace } from '@/app/components/Workspace'
 import { Candidate, Direction, EXTENSION_PERCENT, Mode, STORAGE_KEY, STORAGE_MODE, STORAGE_MODEL } from '@/app/lib/app'
 import { findStyleLabel } from '@/app/lib/artStyles'
-import { DEFAULT_MODEL, MODELS, getModelConfig } from '@/app/lib/models'
+import { DEFAULT_MODEL, MODELS, getModelConfig, skipsArtDirectorReview } from '@/app/lib/models'
 import { LAYER_ORDER, LAYER_ROLES, LayerRole, PARALLAX_MAX_AUTO_STEPS, ParallaxLayer, WORKFLOW_ORDER, createDefaultLayers, getRecommendedLayerIndex, getWorkflowPrerequisite } from '@/app/lib/parallax'
-import { PROP_BATCH, PROP_BATCH_COLS, PROP_BATCH_H, PROP_BATCH_ROWS, PROP_BATCH_W, PROP_TILE_SIZE, PropItem, nextPropId, propAtlasLayout } from '@/app/lib/props'
+import { PROP_BATCH, PROP_BATCH_COLS, PROP_BATCH_H, PROP_BATCH_ROWS, PROP_BATCH_W, PROP_TILE_SIZE, PropItem, nextPropId, propAtlasLayout, resolvePropNames } from '@/app/lib/props'
 import { SPRITE_ANIMATIONS, SPRITE_FRAME_COUNT, SPRITE_FRAME_SIZE, SPRITE_GRID_COLS, SPRITE_GRID_ROWS, SPRITE_SHEET_H, SPRITE_SHEET_W, SPRITE_STRIP_H, SPRITE_STRIP_W, SpriteAnimType, SpriteFrame, SpriteSheet, createEmptySpriteSheet } from '@/app/lib/sprite'
+import { BODY_PLANS, BodyPlan, isAirborneAnim } from '@/app/lib/bodyPlans'
 import { CORNER_GRAFTS, ENABLE_CORNER_RECONCILE, TILESET_ATLAS_EXTRUDE_PX, TILESET_BY_ROLE, TILESET_COLS, TILESET_PADDED_SHEET_H, TILESET_PADDED_SHEET_W, TILESET_PADDED_STRIDE, TILESET_ROWS, TILESET_SHEET_H, TILESET_SHEET_W, TILESET_SLOTS, TILESET_TILE_SIZE, TILE_TEMPLATE_CELL, TILE_TEMPLATE_COLS, TILE_TEMPLATE_H, TILE_TEMPLATE_MASK, TILE_TEMPLATE_ROWS, TILE_TEMPLATE_SAMPLES, TILE_TEMPLATE_W, TileSetRole, TileSetSlot, alignAiOutputToTemplate, applyFeatheredRoleMask, buildTileSheetGuideDataUrl, createEmptyTileSet, rebuildCornerTile, reconcileAllCorners, templateRoleForCell } from '@/app/lib/tileset'
-import { alignSpriteFramesToBaseline, applyFullContextResult, centerSpriteFramesHorizontally, chromaKeyToAlpha, createChunkedExtension, createFullContextExtension, getImageDimensions, harmonizeHorizontalSeams, isAiExtensionUnfilled, makeHorizontallyTileable, makeTileable2D, makeVerticallyTileable, measureSeamResidual, removeFrameBorder, removeUploadedBackground, sliceImageGrid, stitchExtendedChunk } from '@/app/utils/imageProcessor'
+import { alignSpriteFramesToBaseline, applyFullContextResult, centerSpriteFramesHorizontally, chromaKeyToAlpha, createChunkedExtension, createFullContextExtension, getImageDimensions, harmonizeHorizontalSeams, isolatePrimarySpriteComponent, isAiExtensionUnfilled, makeHorizontallyTileable, makeTileable2D, makeVerticallyTileable, measureSeamResidual, normalizeSpriteFrameScale, removeFrameBorder, removeUploadedBackground, sliceImageGrid, stitchExtendedChunk } from '@/app/utils/imageProcessor'
 import { SubjectBounds, drawPoseGuideSheet, measureSubjectBounds } from '@/app/utils/poseRig'
 import JSZip from 'jszip'
 
@@ -124,33 +125,39 @@ export default function Home() {
   // The anchor PERSISTS across animation switches so the same character can
   // be re-used for idle/walk/run/jump/attack/hurt/death without re-rolling
   // identity.
+  // Which body plan we're animating (humanoid / quadruped / serpent / flyer /
+  // blob). The plan selects the deterministic pose rig, the available
+  // animations, and the choreography/QA the API uses.
+  const [spriteBodyPlan, setSpriteBodyPlan] = useState<BodyPlan>('biped')
   const [spriteAnim, setSpriteAnim] = useState<SpriteAnimType>('idle')
   const [spriteSheet, setSpriteSheet] = useState<SpriteSheet>(() =>
     createEmptySpriteSheet('idle')
   )
-  // Per-animation cache so switching tabs doesn't discard generated sheets.
-  // Keyed by animation type; the latest sheet for each anim is kept here so
-  // the user can flip between idle/walk/run/… and still see prior results.
-  // Cleared when the character identity (anchor) changes, since cached sheets
-  // belong to the previous character.
-  const spriteSheetCacheRef = useRef<Partial<Record<SpriteAnimType, SpriteSheet>>>(
-    {}
-  )
-  // Set of animation types that currently have a generated (cached) sheet, used
-  // to mark those tabs with a dot so the user knows results are saved there.
+  // Per-(plan, anim) cache so switching tabs/plans doesn't discard generated
+  // sheets. Keyed by `${bodyPlan}:${anim}`; the latest sheet for each is kept
+  // here so the user can flip between animations and still see prior results.
+  // Cleared when the character identity (anchor) or body plan changes, since
+  // cached sheets belong to the previous character/plan.
+  const spriteSheetCacheRef = useRef<Record<string, SpriteSheet>>({})
+  const spriteCacheKey = (plan: BodyPlan, anim: SpriteAnimType) =>
+    `${plan}:${anim}`
+  // Set of animation types (for the CURRENT plan) that have a generated
+  // (cached) sheet, used to mark those tabs with a dot.
   const [spriteGeneratedAnims, setSpriteGeneratedAnims] = useState<
     Set<SpriteAnimType>
   >(new Set())
   useEffect(() => {
-    spriteSheetCacheRef.current[spriteSheet.anim] = spriteSheet
+    spriteSheetCacheRef.current[spriteCacheKey(spriteBodyPlan, spriteSheet.anim)] =
+      spriteSheet
+    const prefix = `${spriteBodyPlan}:`
     const next = new Set<SpriteAnimType>()
-    for (const [anim, sheet] of Object.entries(spriteSheetCacheRef.current)) {
-      if (sheet && sheet.frames.some((f) => !!f.imageUrl)) {
-        next.add(anim as SpriteAnimType)
+    for (const [key, sheet] of Object.entries(spriteSheetCacheRef.current)) {
+      if (key.startsWith(prefix) && sheet && sheet.frames.some((f) => !!f.imageUrl)) {
+        next.add(key.slice(prefix.length) as SpriteAnimType)
       }
     }
     setSpriteGeneratedAnims(next)
-  }, [spriteSheet])
+  }, [spriteSheet, spriteBodyPlan])
   const [spriteAnchor, setSpriteAnchor] = useState<{
     /** Chroma-keyed thumbnail (transparent background) for display. */
     imageUrl: string
@@ -185,6 +192,7 @@ export default function Home() {
   // "hydrating" state so we don't flash the modal before reading storage.
   const [apiKey, setApiKey] = useState('')
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODEL)
+  const skipArtDirectorReview = skipsArtDirectorReview(selectedModel)
   const [hydrated, setHydrated] = useState(false)
   const [showApiKeyModal, setShowApiKeyModal] = useState(false)
   // Required-mode means the user can't dismiss the modal (first run, no key
@@ -1448,6 +1456,15 @@ export default function Home() {
         // art director is still reviewing the sheet.
         applyMap(reconciled, true)
 
+        if (skipArtDirectorReview) {
+          if (debugMode) {
+            // eslint-disable-next-line no-console
+            console.log('🧱 Skipping art director review for GPT image model')
+          }
+          best = { map: reconciled, score: -1 }
+          break
+        }
+
         phase = 'Art director reviewing'
         setTileProgressMsg('Art director reviewing…')
         const [previewImage, sheetImage] = await Promise.all([
@@ -1941,6 +1958,7 @@ export default function Home() {
   const buildPropManifest = () => {
     const populated = propItems.filter((p) => p.imageUrl)
     const layout = propAtlasLayout(populated.length)
+    const names = resolvePropNames(populated)
     return {
       type: 'prop-atlas',
       generator: 'AI Image Extender — Props',
@@ -1953,7 +1971,8 @@ export default function Home() {
         const r = layout.rect(i)
         return {
           id: p.id,
-          file: `prop_${String(i + 1).padStart(3, '0')}.png`,
+          name: names[i].name,
+          file: names[i].file,
           x: r.x,
           y: r.y,
           width: r.width,
@@ -2236,10 +2255,11 @@ export default function Home() {
         return
       }
       const zip = new JSZip()
+      const names = resolvePropNames(populated)
       populated.forEach((p, i) => {
         const base64 = (p.imageUrl as string).split(',')[1]
         if (base64) {
-          zip.file(`prop_${String(i + 1).padStart(3, '0')}.png`, base64, {
+          zip.file(names[i].file, base64, {
             base64: true,
           })
         }
@@ -2282,12 +2302,31 @@ export default function Home() {
     // Persist the current sheet, then restore a previously generated sheet for
     // the target animation if we have one cached (so the user can flip back and
     // forth without losing results). Falls back to a fresh empty sheet.
-    spriteSheetCacheRef.current[spriteAnim] = spriteSheet
-    const cached = spriteSheetCacheRef.current[next]
+    spriteSheetCacheRef.current[spriteCacheKey(spriteBodyPlan, spriteAnim)] =
+      spriteSheet
+    const cached = spriteSheetCacheRef.current[spriteCacheKey(spriteBodyPlan, next)]
     setSpriteAnim(next)
     setSpriteSheet(cached ?? createEmptySpriteSheet(next))
     setSpriteFps(cached?.fps ?? SPRITE_ANIMATIONS[next].defaultFps)
     setSpriteProgressMsg(null)
+  }
+
+  /** Switch body plan. Animations, the pose rig, and the anchor identity are
+   * all plan-specific, so this resets to the plan's default animation, drops
+   * the previous character anchor and cached sheets, and starts clean. */
+  const handleSelectBodyPlan = (next: BodyPlan) => {
+    if (next === spriteBodyPlan) return
+    if (spriteGenerating) return
+    const plan = BODY_PLANS[next]
+    const nextAnim = plan.defaultAnim
+    spriteSheetCacheRef.current = {}
+    setSpriteBodyPlan(next)
+    setSpriteAnim(nextAnim)
+    setSpriteSheet(createEmptySpriteSheet(nextAnim))
+    setSpriteFps(SPRITE_ANIMATIONS[nextAnim].defaultFps)
+    setSpriteAnchor(null)
+    setSpriteProgressMsg(null)
+    setError(null)
   }
 
   /**
@@ -2311,6 +2350,7 @@ export default function Home() {
         apiKey: apiKey || undefined,
         model: selectedModel,
         spriteAnchor: true,
+        spriteBodyPlan,
         sceneBrief: sceneBrief.trim() ? sceneBrief.trim() : undefined,
       }),
     })
@@ -2372,6 +2412,7 @@ export default function Home() {
         model: selectedModel,
         spriteSheet: true,
         spriteAnim,
+        spriteBodyPlan,
         spriteFrameCount: SPRITE_FRAME_COUNT,
         spriteGridCols: SPRITE_GRID_COLS,
         spriteGridRows: SPRITE_GRID_ROWS,
@@ -2408,31 +2449,68 @@ export default function Home() {
         // Strip any dark cell-divider/border line the model painted around the
         // frame. It isn't magenta, so chroma-keying leaves it as a dark square
         // outline; this erases full-span border bands at the cell edges.
+        let cleaned = keyed
         try {
-          return await removeFrameBorder(keyed)
+          cleaned = await removeFrameBorder(cleaned)
         } catch {
-          return keyed
+          cleaned = keyed
         }
+        // Non-humanoid generations, especially long quadrupeds, can still
+        // duplicate/spill across a hidden cell boundary. Keep the main
+        // connected creature silhouette and erase detached secondary copies
+        // before alignment/playback/export.
+        if (spriteBodyPlan !== 'biped') {
+          try {
+            // Compact bodies (quadruped/blob) can have two creatures fused by a
+            // thin bridge; allow morphological splitting for them. Thin subjects
+            // (serpent/flyer) must NOT be split or erosion would fragment them.
+            const enableSplit =
+              spriteBodyPlan === 'quadruped' || spriteBodyPlan === 'blob'
+            cleaned = await isolatePrimarySpriteComponent(cleaned, { enableSplit })
+          } catch {
+            // Keep the prior cleanup if component isolation fails.
+          }
+        }
+        return cleaned
       })
     )
 
-    // Baseline alignment — pixel-level post-process that kills the
-    // remaining y-axis drift the model can't fully suppress. Detects the
-    // foot baseline of each chroma-keyed cell from the alpha channel,
-    // then translates each cell so feet match a robust median target.
-    // Airborne frames (jump apex, run mid-air) drift outside the tolerance
-    // window and are preserved as-is, so the animation still has the
-    // intended vertical motion.
+    // Scale normalization — the model redraws the character at a slightly
+    // different size in every cell, so the silhouette "breathes" during
+    // playback. Rescale each frame toward the median silhouette size BEFORE
+    // baseline/horizontal passes re-seat position, so the creature holds one
+    // constant scale frame to frame. Runs for every body plan (humanoid too).
     let alignedCells = keyedCells
     try {
-      // Jump and run are the only animations with airborne frames; every
-      // other animation is fully grounded, so plant ALL its frames on the
-      // bottom-most foot line (no airborne tolerance, which previously left
-      // a whole drifted row floating above the baseline).
-      const hasAirborne = spriteAnim === 'jump' || spriteAnim === 'run'
-      const alignment = await alignSpriteFramesToBaseline(keyedCells, {
-        maxShift: Math.floor(SPRITE_FRAME_SIZE * 0.2),
+      const scaled = await normalizeSpriteFrameScale(keyedCells, {
+        tolerance: 0.05,
+        maxScaleAdjust: 0.18,
+      })
+      alignedCells = scaled.cells
+      // eslint-disable-next-line no-console
+      console.log('[Sprite] Scale normalization:', {
+        target: scaled.targetSize,
+        sizes: scaled.sizes,
+        scales: scaled.scales,
+      })
+    } catch (err) {
+      console.warn('Sprite scale normalization failed; using raw cells:', err)
+    }
+
+    // Baseline alignment — pixel-level post-process that kills the remaining
+    // y-axis drift the model can't fully suppress. Grounded animations plant
+    // every frame on a fixed in-cell ground line; airborne/flying animations
+    // anchor their most-grounded pose to that same line and rigidly carry the
+    // remaining frames so genuine lifts (jump/run/flight) are preserved.
+    try {
+      const hasAirborne = isAirborneAnim(spriteBodyPlan, spriteAnim)
+      // Fixed in-cell ground line shared by every animation so a walk and a run
+      // of the same creature rest on the SAME floor. Grounded anims plant each
+      // frame to it; airborne anims anchor their most-grounded pose to it and
+      // rigidly carry the rest (preserving the lift).
+      const alignment = await alignSpriteFramesToBaseline(alignedCells, {
         groundAll: !hasAirborne,
+        targetBaseline: Math.round(SPRITE_FRAME_SIZE * 0.9),
       })
       alignedCells = alignment.cells
       // eslint-disable-next-line no-console
@@ -2482,6 +2560,7 @@ export default function Home() {
         body: JSON.stringify({
           prompt: spritePrompt.trim() || undefined,
           anim: spriteAnim,
+          bodyPlan: spriteBodyPlan,
           sceneBrief: sceneBrief.trim() ? sceneBrief.trim() : undefined,
           apiKey: apiKey || undefined,
           sheetImage,
@@ -2497,16 +2576,46 @@ export default function Home() {
     }
   }
 
-  /** Deterministic twin/clone detector. A correct frame is ONE centered figure
-   * → its alpha column-mass profile is a single hump. When the model paints two
-   * characters side by side, the profile splits into two comparable humps with
-   * a clear empty valley between them. We flag a cell as a "twin" only when the
-   * second hump carries a substantial fraction of the first hump's mass, so a
-   * thin extended weapon (small mass) never trips it. Returns the number of
-   * cells that look duplicated. Best-effort — returns 0 if anything fails. */
+  /** Deterministic twin/spillover detector. A correct frame is ONE centered
+   * figure → its alpha mass profile is a single hump on both axes. When the
+   * model paints two characters side-by-side OR lets a creature spill from the
+   * row above/below into this sliced cell, the alpha profile splits into two
+   * comparable humps with a clear empty valley. We flag only when the second
+   * hump carries a substantial fraction of the first hump's mass, so an
+   * extended tail/weapon/wing does not trip it. Returns the number of cells
+   * that look duplicated or grid-spilled. Best-effort — returns 0 if anything
+   * fails. */
   const detectSpriteDuplicateCells = async (cells: string[]): Promise<number> => {
     const W = 100 // downscaled analysis width — fast, plenty for column stats
     const H = 100
+    const hasSplitMass = (profile: number[]) => {
+      const peak = Math.max(...profile)
+      if (peak <= 0) return false
+      const occThresh = peak * 0.06
+      // Segment occupied runs; only an empty gap at least 5% of the dimension
+      // separates two figures (bridges tiny internal gaps between legs/tails).
+      const minGap = Math.max(3, Math.round(profile.length * 0.05))
+      const segments: { mass: number }[] = []
+      let cur: number | null = null
+      let gap = 0
+      for (let i = 0; i < profile.length; i++) {
+        if (profile[i] > occThresh) {
+          if (cur === null) {
+            segments.push({ mass: 0 })
+            cur = segments.length - 1
+          }
+          segments[cur].mass += profile[i]
+          gap = 0
+        } else if (cur !== null) {
+          gap++
+          if (gap >= minGap) cur = null
+        }
+      }
+      if (segments.length < 2) return false
+      segments.sort((a, b) => b.mass - a.mass)
+      // Two comparable masses ⇒ a real twin / spillover; a limb/tail is smaller.
+      return segments[1].mass >= segments[0].mass * 0.45
+    }
     const analyze = (url: string): Promise<boolean> =>
       new Promise((resolve) => {
         const img = new Image()
@@ -2521,38 +2630,15 @@ export default function Home() {
             ctx.drawImage(img, 0, 0, W, H)
             const { data } = ctx.getImageData(0, 0, W, H)
             const colMass = new Array<number>(W).fill(0)
-            for (let x = 0; x < W; x++) {
-              let m = 0
-              for (let y = 0; y < H; y++) m += data[(y * W + x) * 4 + 3]
-              colMass[x] = m
-            }
-            const peak = Math.max(...colMass)
-            if (peak <= 0) return resolve(false)
-            const occThresh = peak * 0.06
-            // Segment occupied column runs; only an empty gap at least 5% of the
-            // width separates two figures (bridges tiny internal gaps).
-            const minGap = Math.max(3, Math.round(W * 0.05))
-            const segments: { mass: number }[] = []
-            let cur: number | null = null
-            let gap = 0
-            for (let x = 0; x < W; x++) {
-              if (colMass[x] > occThresh) {
-                if (cur === null) {
-                  segments.push({ mass: 0 })
-                  cur = segments.length - 1
-                }
-                segments[cur].mass += colMass[x]
-                gap = 0
-              } else if (cur !== null) {
-                gap++
-                if (gap >= minGap) cur = null
+            const rowMass = new Array<number>(H).fill(0)
+            for (let y = 0; y < H; y++) {
+              for (let x = 0; x < W; x++) {
+                const alpha = data[(y * W + x) * 4 + 3]
+                colMass[x] += alpha
+                rowMass[y] += alpha
               }
             }
-            if (segments.length < 2) return resolve(false)
-            segments.sort((a, b) => b.mass - a.mass)
-            // Two comparable masses ⇒ a real twin; a weapon/limb is far smaller.
-            const twin = segments[1].mass >= segments[0].mass * 0.45
-            resolve(twin)
+            resolve(hasSplitMass(colMass) || hasSplitMass(rowMass))
           } catch {
             resolve(false)
           }
@@ -2672,15 +2758,16 @@ export default function Home() {
 
       let fixNotes: string | undefined
       for (let pass = 0; pass < MAX_SPRITE_REVIEW_PASSES; pass++) {
-        phaseLabel = 'Art director reviewing'
-        setSpriteProgressMsg('Art director reviewing…')
+        phaseLabel = 'Checking frames'
+        setSpriteProgressMsg('Checking frames…')
 
-        // Deterministic twin check (cheap, reliable) + vision critique. The
-        // twin detector guarantees we catch side-by-side duplicates even if the
-        // vision critic misses them, then prepends a forceful fix instruction.
+        // The art-director vision review is intentionally DISABLED for all
+        // sprite generations, on every AI model. We keep only the cheap,
+        // deterministic twin/spillover check (no extra model call) to catch
+        // duplicate creatures and trigger a repaint.
         const [twinCount, review] = await Promise.all([
           detectSpriteDuplicateCells(sheetResult.keyedCells),
-          fetchSpriteReview(sheetResult.keyedSheetUrl, anchorRef?.imageUrl ?? null),
+          Promise.resolve(null as Awaited<ReturnType<typeof fetchSpriteReview>>),
         ])
         if (spriteStopRef.current) return
 
@@ -2695,7 +2782,7 @@ export default function Home() {
 
         const dupNote =
           twinCount > 0
-            ? `CRITICAL DEFECT: ${twinCount} cell(s) contain TWO copies of the character standing side by side. Paint EXACTLY ONE single character per cell, centered — completely remove the duplicate/twin/clone figure. This is the highest-priority fix. `
+            ? `CRITICAL DEFECT: ${twinCount} cell(s) contain duplicate/spillover creatures: either two copies in one cell, or a full creature plus a cropped partial creature/body part from a neighbouring row/column. Paint EXACTLY ONE single character per ${SPRITE_FRAME_SIZE}×${SPRITE_FRAME_SIZE} cell, centered and scaled down with a clear magenta gutter; no head, tail, wing, leg, body, fur, shadow, or motion shape may cross a hidden cell boundary. This is the highest-priority fix. `
             : ''
         const visionNote = visionBad
           ? review!.fix || review!.issues.join('; ')
@@ -2712,7 +2799,7 @@ export default function Home() {
 
         phaseLabel = `Repainting frames (pass ${pass + 2})`
         setSpriteProgressMsg(
-          twinCount > 0 ? 'Duplicate found — repainting…' : 'Issues found — repainting…'
+          twinCount > 0 ? 'Duplicate/spillover found — repainting…' : 'Issues found — repainting…'
         )
         sheetResult = await runSpriteSheetPass(
           effectivePrompt,
@@ -2927,6 +3014,7 @@ export default function Home() {
     ctx.imageSmoothingEnabled = true
     drawPoseGuideSheet(ctx, {
       anim: spriteAnim,
+      bodyPlan: spriteBodyPlan,
       cols: SPRITE_GRID_COLS,
       rows: SPRITE_GRID_ROWS,
       cellSize: SPRITE_FRAME_SIZE,
@@ -3068,6 +3156,8 @@ export default function Home() {
     const stripCols = Math.max(1, count)
     return {
       version: 1,
+      bodyPlan: spriteBodyPlan,
+      bodyPlanLabel: BODY_PLANS[spriteBodyPlan].label,
       anim: spriteAnim,
       label: spec.label,
       frameCount: count,
@@ -3763,6 +3853,8 @@ export default function Home() {
         <SpriteStudio
           sheet={spriteSheet}
           anchor={spriteAnchor}
+          bodyPlan={spriteBodyPlan}
+          setBodyPlan={handleSelectBodyPlan}
           selectedAnim={spriteAnim}
           setSelectedAnim={handleSelectSpriteAnim}
           generatedAnims={spriteGeneratedAnims}

@@ -2381,6 +2381,10 @@ interface FrameAlignmentOptions {
    *  walk / attack / hurt / death. Leave false for jump / run so apex frames
    *  that drift past `maxShift` keep their lift. */
   groundAll?: boolean
+  /** Explicit target baseline (y px within the cell). When provided, grounded
+   *  frames are planted to this fixed ground line instead of the median of the
+   *  generated bottoms. Use this when the whole generated sheet sits too high. */
+  targetBaseline?: number
 }
 
 /**
@@ -2644,7 +2648,6 @@ export async function alignSpriteFramesToBaseline(
 
   const images = await Promise.all(cells.map((c) => loadImageFromUrl(c)))
   const cellHeight = images[0]?.height ?? 512
-  const maxShift = opts.maxShift ?? Math.floor(cellHeight * 0.2)
   const runRows = Math.max(3, Math.round(cellHeight * 0.012))
 
   // Extract bottoms.
@@ -2659,51 +2662,78 @@ export async function alignSpriteFramesToBaseline(
     return findFrameBottomY(data, alphaThreshold, minRowPixels, runRows)
   })
 
-  // Median over valid (non -1) bottoms. If none are valid, return
-  // unchanged. The MEDIAN is deliberately robust: a single frame whose
-  // detected bottom is still off (residual artifact, or a genuinely lower
-  // pose) cannot drag the whole sheet's baseline with it. In the common case
-  // the bottoms cluster tightly, so the median IS the true foot line; when a
-  // whole row has drifted high, the median lands on the larger (grounded)
-  // cluster, pulling the drifted row down to it.
+  // The FLOOR (ground line) the animation is planted on. Prefer the caller's
+  // explicit target; otherwise fall back to the median of the detected bottoms
+  // so behaviour without a target stays sensible.
   const validBottoms = detected.filter((b) => b >= 0).sort((a, b) => a - b)
   if (validBottoms.length === 0) {
     return { cells, targetBaseline: null, detected, shifted: detected.map(() => 0) }
   }
-  const targetBaseline = validBottoms[Math.floor(validBottoms.length / 2)]
+  const floor =
+    typeof opts.targetBaseline === 'number'
+      ? Math.max(0, Math.min(cellHeight - 1, Math.round(opts.targetBaseline)))
+      : validBottoms[Math.floor(validBottoms.length / 2)]
 
-  // Shift each cell.
   const aligned: string[] = []
   const shifts: number[] = []
-  for (let i = 0; i < cells.length; i++) {
-    const bottom = detected[i]
-    if (bottom < 0) {
-      aligned.push(cells[i])
-      shifts.push(0)
-      continue
+  const clamp = (d: number) => Math.max(-cellHeight, Math.min(cellHeight, d))
+
+  if (groundAll) {
+    // GROUNDED anim (idle / walk / attack / …): every frame's OWN bottom is
+    // planted on the floor line so the creature never drifts vertically — no
+    // exemptions, no maxShift, no median that lets a whole high row float.
+    for (let i = 0; i < cells.length; i++) {
+      const bottom = detected[i]
+      if (bottom < 0) {
+        aligned.push(cells[i])
+        shifts.push(0)
+        continue
+      }
+      const delta = clamp(floor - bottom)
+      if (Math.abs(delta) < 1) {
+        aligned.push(cells[i])
+        shifts.push(0)
+        continue
+      }
+      try {
+        aligned.push(shiftCellVertical(images[i], delta))
+        shifts.push(delta)
+      } catch {
+        aligned.push(cells[i])
+        shifts.push(0)
+      }
     }
-    const delta = targetBaseline - bottom
-    if (!groundAll && Math.abs(delta) > maxShift) {
-      // Airborne / outlier frame — preserve (only when the anim can have
-      // airborne frames; grounded anims always plant every frame).
-      aligned.push(cells[i])
-      shifts.push(0)
-      continue
-    }
-    if (Math.abs(delta) < 1) {
-      // Already aligned.
-      aligned.push(cells[i])
-      shifts.push(0)
-      continue
-    }
-    try {
-      aligned.push(shiftCellVertical(images[i], delta))
-      shifts.push(delta)
-    } catch {
-      aligned.push(cells[i])
-      shifts.push(0)
+  } else {
+    // AIRBORNE anim (jump / run / pounce / flight …): a RIGID shift. Anchor the
+    // most-grounded pose (a robust high percentile of the bottoms, so one
+    // stray-low frame can't skew it) to the floor, then translate EVERY frame
+    // by that SAME delta. This preserves the animation's real vertical motion
+    // (the lift between contact and suspension) while guaranteeing the lowest
+    // pose sits on the ground and nothing floats due to a global offset.
+    const gi = Math.min(
+      validBottoms.length - 1,
+      Math.round((validBottoms.length - 1) * 0.85)
+    )
+    const groundRef = validBottoms[gi]
+    const delta = clamp(floor - groundRef)
+    for (let i = 0; i < cells.length; i++) {
+      const bottom = detected[i]
+      if (bottom < 0 || Math.abs(delta) < 1) {
+        aligned.push(cells[i])
+        shifts.push(0)
+        continue
+      }
+      try {
+        aligned.push(shiftCellVertical(images[i], delta))
+        shifts.push(delta)
+      } catch {
+        aligned.push(cells[i])
+        shifts.push(0)
+      }
     }
   }
+
+  const targetBaseline = floor
 
   return {
     cells: aligned,
@@ -2711,6 +2741,171 @@ export async function alignSpriteFramesToBaseline(
     detected,
     shifted: shifts,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sprite-sheet frame SCALE normalization
+// ---------------------------------------------------------------------------
+//
+// Baseline + horizontal centering fix where a frame sits, but not how BIG the
+// model drew it. The image model re-draws the character independently in every
+// cell, so its overall size wobbles ±10–25% frame to frame — the silhouette
+// "breathes" during playback even though the pose guide asked for one constant
+// scale. Quadrupeds/serpents show it worst because their pose guide is capped
+// small (to keep the long body inside one cell), leaving the model more slack.
+//
+// This pass measures each frame's tight silhouette, takes the MEDIAN size as
+// the intended scale, and uniformly rescales each frame toward that median.
+// Two safeguards keep it from flattening real animation:
+//   • a tolerance band — frames already close to the target are left untouched;
+//   • a clamp on the correction — no frame is scaled by more than ±maxAdjust,
+//     so a genuinely extended pose (run reach, attack lunge) keeps its shape.
+// We measure SIZE as the bbox diagonal √(w²+h²): when a creature flattens, its
+// width grows while its height shrinks, so the diagonal stays far more
+// pose-stable than either dimension alone — it tracks true size, not pose.
+
+/** Tight alpha bounding box of a frame, ignoring chroma-key halo and single
+ *  stray pixels (a row/column must hold ≥ `noiseFloorPx` opaque pixels). */
+function measureAlphaBBox(
+  img: HTMLImageElement,
+  alphaThreshold: number,
+  noiseFloorPx: number
+): { minX: number; minY: number; w: number; h: number } | null {
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0)
+  const { data } = ctx.getImageData(0, 0, img.width, img.height)
+  const w = img.width
+  const h = img.height
+  const rowCount = new Int32Array(h)
+  const colCount = new Int32Array(w)
+  for (let y = 0; y < h; y++) {
+    const rowStart = y * w * 4
+    for (let x = 0; x < w; x++) {
+      if (data[rowStart + x * 4 + 3] > alphaThreshold) {
+        rowCount[y]++
+        colCount[x]++
+      }
+    }
+  }
+  let minX = -1
+  let maxX = -1
+  let minY = -1
+  let maxY = -1
+  for (let x = 0; x < w; x++) {
+    if (colCount[x] >= noiseFloorPx) {
+      if (minX < 0) minX = x
+      maxX = x
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    if (rowCount[y] >= noiseFloorPx) {
+      if (minY < 0) minY = y
+      maxY = y
+    }
+  }
+  if (minX < 0 || minY < 0) return null
+  return { minX, minY, w: maxX - minX + 1, h: maxY - minY + 1 }
+}
+
+interface FrameScaleOptions {
+  /** Alpha above which a pixel counts as character content. Default 64. */
+  alphaThreshold?: number
+  /** Min opaque pixels per row/column to count (rejects halo + strays). */
+  noiseFloorPx?: number
+  /** Frames whose size is within this fraction of the target are left as-is. */
+  tolerance?: number
+  /** Clamp each frame's scale correction to ±this fraction so real pose
+   *  extension/squash is preserved. Default 0.18. */
+  maxScaleAdjust?: number
+}
+
+/**
+ * Normalize the on-screen SIZE of each sprite frame so the character keeps a
+ * constant scale through the animation. Rescales about each frame's silhouette
+ * center (subsequent baseline + horizontal passes re-seat position), returning
+ * fresh cells plus diagnostics. Cells that can't be measured are passed through
+ * unchanged. Run this BEFORE baseline alignment / horizontal centering.
+ */
+export async function normalizeSpriteFrameScale(
+  cells: string[],
+  opts: FrameScaleOptions = {}
+): Promise<{
+  cells: string[]
+  targetSize: number | null
+  sizes: number[]
+  scales: number[]
+}> {
+  if (cells.length === 0) {
+    return { cells, targetSize: null, sizes: [], scales: [] }
+  }
+  const alphaThreshold = opts.alphaThreshold ?? 64
+  const noiseFloorPx = opts.noiseFloorPx ?? 3
+  const tolerance = opts.tolerance ?? 0.05
+  const maxScaleAdjust = opts.maxScaleAdjust ?? 0.18
+
+  const images = await Promise.all(cells.map((c) => loadImageFromUrl(c)))
+  const boxes = images.map((img) =>
+    measureAlphaBBox(img, alphaThreshold, noiseFloorPx)
+  )
+  // Pose-stable size metric: bbox diagonal.
+  const sizes = boxes.map((b) => (b ? Math.hypot(b.w, b.h) : -1))
+  const valid = sizes.filter((s) => s > 0).sort((a, b) => a - b)
+  if (valid.length === 0) {
+    return { cells, targetSize: null, sizes, scales: sizes.map(() => 1) }
+  }
+  const targetSize = valid[Math.floor(valid.length / 2)] // median
+
+  const out: string[] = []
+  const scales: number[] = []
+  for (let i = 0; i < cells.length; i++) {
+    const box = boxes[i]
+    const size = sizes[i]
+    if (!box || size <= 0) {
+      out.push(cells[i])
+      scales.push(1)
+      continue
+    }
+    let factor = targetSize / size
+    factor = Math.max(1 - maxScaleAdjust, Math.min(1 + maxScaleAdjust, factor))
+    if (Math.abs(factor - 1) < tolerance) {
+      out.push(cells[i])
+      scales.push(1)
+      continue
+    }
+    try {
+      const img = images[i]
+      const canvas = document.createElement('canvas')
+      canvas.width = img.width
+      canvas.height = img.height
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        out.push(cells[i])
+        scales.push(1)
+        continue
+      }
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      // Scale about the silhouette center so it doesn't fly out of the cell;
+      // baseline + horizontal passes re-anchor the exact position afterwards.
+      const pivotX = box.minX + box.w / 2
+      const pivotY = box.minY + box.h / 2
+      ctx.translate(pivotX, pivotY)
+      ctx.scale(factor, factor)
+      ctx.translate(-pivotX, -pivotY)
+      ctx.drawImage(img, 0, 0)
+      out.push(canvas.toDataURL('image/png'))
+      scales.push(factor)
+    } catch {
+      out.push(cells[i])
+      scales.push(1)
+    }
+  }
+
+  return { cells: out, targetSize, sizes, scales }
 }
 
 // ---------------------------------------------------------------------------
@@ -2808,6 +3003,311 @@ export async function removeFrameBorder(
     }
   }
 
+  if (!changed) return cellDataUrl
+  ctx.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+// ---------------------------------------------------------------------------
+// Sprite-frame connected-component cleanup
+// ---------------------------------------------------------------------------
+//
+// Some image models ignore the hidden 4×2 grid and paint a second creature
+// inside a single sliced cell (often vertically: one full wolf plus the cropped
+// top/bottom of another wolf). Prompting + QA can reduce this, but a
+// deterministic cleanup is more reliable: after chroma-keying, find connected
+// opaque alpha components and keep only the main creature component.
+
+interface PrimaryComponentOptions {
+  /** Alpha above which a pixel counts as sprite content. Default 32. */
+  alphaThreshold?: number
+  /** Components smaller than this fraction of the cell are ignored as noise.
+   *  Default 0.005 (≈1300px on a 512 cell). */
+  minComponentFraction?: number
+  /** Enable morphological splitting of a SINGLE connected blob that is really
+   *  two creatures joined by a thin bridge. Safe for compact bodies
+   *  (quadruped/blob); leave OFF for thin subjects (serpent/eel/winged flyer)
+   *  where erosion could fragment one legitimate creature. Default false. */
+  enableSplit?: boolean
+}
+
+interface SpriteComponent {
+  id: number
+  count: number
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+  sumX: number
+  sumY: number
+}
+
+/** Binary morphological erosion (4-neighbour), `iterations` passes. A pixel
+ *  survives only if all 4 orthogonal neighbours are also foreground, so thin
+ *  bridges ≤ 2·iterations px wide are severed while solid masses persist. */
+function erodeMask(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  iterations: number
+): Uint8Array {
+  let cur = mask
+  for (let it = 0; it < iterations; it++) {
+    const next = new Uint8Array(cur.length)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        if (!cur[i]) continue
+        if (
+          x > 0 &&
+          x < w - 1 &&
+          y > 0 &&
+          y < h - 1 &&
+          cur[i - 1] &&
+          cur[i + 1] &&
+          cur[i - w] &&
+          cur[i + w]
+        ) {
+          next[i] = 1
+        }
+      }
+    }
+    cur = next
+  }
+  return cur
+}
+
+/** Binary morphological dilation (4-neighbour), `iterations` passes. */
+function dilateMask(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  iterations: number
+): Uint8Array {
+  let cur = mask
+  for (let it = 0; it < iterations; it++) {
+    const next = new Uint8Array(cur.length)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        if (cur[i]) {
+          next[i] = 1
+          continue
+        }
+        if (
+          (x > 0 && cur[i - 1]) ||
+          (x < w - 1 && cur[i + 1]) ||
+          (y > 0 && cur[i - w]) ||
+          (y < h - 1 && cur[i + w])
+        ) {
+          next[i] = 1
+        }
+      }
+    }
+    cur = next
+  }
+  return cur
+}
+
+/** Label 4-connected components of a binary mask. Returns the label buffer
+ *  (-1 = background) and a per-label centroid/count summary. */
+function labelMaskComponents(
+  mask: Uint8Array,
+  w: number,
+  h: number
+): { labels: Int32Array; comps: { id: number; count: number; sumX: number; sumY: number }[] } {
+  const labels = new Int32Array(w * h).fill(-1)
+  const comps: { id: number; count: number; sumX: number; sumY: number }[] = []
+  const stack: number[] = []
+  for (let p = 0; p < w * h; p++) {
+    if (labels[p] !== -1 || !mask[p]) continue
+    const id = comps.length
+    const comp = { id, count: 0, sumX: 0, sumY: 0 }
+    labels[p] = id
+    stack.length = 0
+    stack.push(p)
+    while (stack.length) {
+      const cur = stack.pop() as number
+      const x = cur % w
+      const y = (cur / w) | 0
+      comp.count++
+      comp.sumX += x
+      comp.sumY += y
+      const nb = [
+        x > 0 ? cur - 1 : -1,
+        x < w - 1 ? cur + 1 : -1,
+        y > 0 ? cur - w : -1,
+        y < h - 1 ? cur + w : -1,
+      ]
+      for (const n of nb) {
+        if (n < 0 || labels[n] !== -1 || !mask[n]) continue
+        labels[n] = id
+        stack.push(n)
+      }
+    }
+    comps.push(comp)
+  }
+  return { labels, comps }
+}
+
+/**
+ * Keep only the primary connected alpha component in a sprite cell.
+ *
+ * The selected component is normally the largest; a small centre bonus helps
+ * choose the intended centered creature when a cropped spillover component is
+ * still fairly large. Returns the original data URL if there is only one real
+ * component.
+ */
+export async function isolatePrimarySpriteComponent(
+  cellDataUrl: string,
+  opts: PrimaryComponentOptions = {}
+): Promise<string> {
+  const alphaThreshold = opts.alphaThreshold ?? 32
+  const minComponentFraction = opts.minComponentFraction ?? 0.005
+  const enableSplit = opts.enableSplit ?? false
+
+  const img = await loadImageFromUrl(cellDataUrl)
+  const w = img.width
+  const h = img.height
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return cellDataUrl
+  ctx.drawImage(img, 0, 0)
+  const imageData = ctx.getImageData(0, 0, w, h)
+  const { data } = imageData
+
+  const labels = new Int32Array(w * h)
+  labels.fill(-1)
+  const components: SpriteComponent[] = []
+  const minPixels = Math.max(24, Math.round(w * h * minComponentFraction))
+  const stack: number[] = []
+
+  for (let p = 0; p < w * h; p++) {
+    if (labels[p] !== -1 || data[p * 4 + 3] <= alphaThreshold) continue
+
+    const id = components.length
+    const comp: SpriteComponent = {
+      id,
+      count: 0,
+      minX: w,
+      minY: h,
+      maxX: -1,
+      maxY: -1,
+      sumX: 0,
+      sumY: 0,
+    }
+    labels[p] = id
+    stack.length = 0
+    stack.push(p)
+
+    while (stack.length) {
+      const cur = stack.pop() as number
+      const x = cur % w
+      const y = Math.floor(cur / w)
+      comp.count++
+      comp.sumX += x
+      comp.sumY += y
+      if (x < comp.minX) comp.minX = x
+      if (x > comp.maxX) comp.maxX = x
+      if (y < comp.minY) comp.minY = y
+      if (y > comp.maxY) comp.maxY = y
+
+      const neighbours = [
+        x > 0 ? cur - 1 : -1,
+        x < w - 1 ? cur + 1 : -1,
+        y > 0 ? cur - w : -1,
+        y < h - 1 ? cur + w : -1,
+      ]
+      for (const n of neighbours) {
+        if (n < 0 || labels[n] !== -1 || data[n * 4 + 3] <= alphaThreshold) {
+          continue
+        }
+        labels[n] = id
+        stack.push(n)
+      }
+    }
+
+    components.push(comp)
+  }
+
+  const real = components.filter((c) => c.count >= minPixels)
+  if (real.length === 0) return cellDataUrl
+
+  const centerX = w / 2
+  const centerY = h / 2
+  const scoreOf = (count: number, cx: number, cy: number) => {
+    const dist = Math.hypot((cx - centerX) / w, (cy - centerY) / h)
+    return count * (1 + Math.max(0, 0.35 - dist))
+  }
+
+  // CASE A — multiple disconnected components: keep the dominant central one,
+  // erase the rest (a separate spillover/duplicate creature).
+  if (real.length >= 2) {
+    const keep = real
+      .map((c) => ({
+        component: c,
+        score: scoreOf(c.count, c.sumX / c.count, c.sumY / c.count),
+      }))
+      .sort((a, b) => b.score - a.score)[0].component
+    let changed = false
+    for (let p = 0; p < w * h; p++) {
+      const label = labels[p]
+      if (label !== -1 && label !== keep.id) {
+        data[p * 4 + 3] = 0
+        changed = true
+      }
+    }
+    if (!changed) return cellDataUrl
+    ctx.putImageData(imageData, 0, 0)
+    return canvas.toDataURL('image/png')
+  }
+
+  // CASE B — a SINGLE component. Usually that's just the creature, but two
+  // creatures joined by a thin bridge (a leg/halo touching spillover from a
+  // neighbouring cell) also read as one blob. Morphological OPENING tells the
+  // difference: erode to sever thin bridges, then see if the blob splits into
+  // ≥2 substantial cores. If it does, keep the dominant core's region; if it
+  // stays one piece (a normal creature, or a thin-bodied snake/eel), bail out
+  // untouched so we never fragment a legitimate single subject.
+  if (!enableSplit) return cellDataUrl
+  const only = real[0]
+  const mask = new Uint8Array(w * h)
+  for (let p = 0; p < w * h; p++) {
+    if (labels[p] === only.id) mask[p] = 1
+  }
+  const radius = Math.max(2, Math.round(Math.min(w, h) * 0.01)) // ~5px on 512
+  const eroded = erodeMask(mask, w, h, radius)
+  const { labels: eLabels, comps: eComps } = labelMaskComponents(eroded, w, h)
+  // A core must be a meaningful chunk of the blob to count as a separate body.
+  const coreMin = Math.max(minPixels * 0.5, only.count * 0.12)
+  const cores = eComps.filter((c) => c.count >= coreMin)
+  if (cores.length < 2) return cellDataUrl // single subject — leave it alone
+
+  const dominant = cores
+    .map((c) => ({
+      core: c,
+      score: scoreOf(c.count, c.sumX / c.count, c.sumY / c.count),
+    }))
+    .sort((a, b) => b.score - a.score)[0].core
+
+  // Grow the chosen core back to (roughly) its original silhouette and clip to
+  // the real alpha, so the kept creature is whole but the other body — a
+  // different eroded core that we don't dilate — stays erased.
+  const coreMask = new Uint8Array(w * h)
+  for (let p = 0; p < w * h; p++) {
+    if (eLabels[p] === dominant.id) coreMask[p] = 1
+  }
+  const keepMask = dilateMask(coreMask, w, h, radius + 1)
+
+  let changed = false
+  for (let p = 0; p < w * h; p++) {
+    if (mask[p] && !keepMask[p]) {
+      data[p * 4 + 3] = 0
+      changed = true
+    }
+  }
   if (!changed) return cellDataUrl
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
