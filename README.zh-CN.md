@@ -254,6 +254,9 @@ VISION_PROVIDER_MODEL=google/gemini-2.0-flash-001
 - **Provider adapters** 用于模型访问。OpenRouter 仍是默认值。
   - Image：`google/gemini-3.1-flash-image-preview`（Nano Banana 2，默认）、`google/gemini-3-pro-image-preview`（Nano Banana Pro）、`google/gemini-2.5-flash-image`（Nano Banana）和 `openai/gpt-5.4-image-2`（GPT-5.4 Image 2，高保真，较慢）
   - Reasoning / vision QA（场景简报、道具美术总监、瓦片评审）：`google/gemini-2.0-flash-001`
+- **Codex Skill package** 位于 `skills/image-extender-studio/`，用于通过
+  Markdown 编排、自定义 provider、Codex App imagegen 和确定性的 Python
+  后处理脚本运行同一组工作流。
 
 ## 项目结构
 
@@ -287,6 +290,18 @@ app/
 ├── globals.css                深色“工作室”设计系统
 ├── layout.tsx                 根布局，Inter 字体
 └── page.tsx                   应用外壳：状态、生成流水线、QA 循环
+
+skills/
+├── README.md                  Skill 模块概览
+└── image-extender-studio/
+    ├── SKILL.md               Codex Skill 入口与工作流路由
+    ├── agents/openai.yaml     Codex skill 列表 UI 元数据
+    ├── references/            Extender / Parallax / Tileset / Sprite /
+    │                          Props 子流程指南与 provider 文档
+    └── scripts/
+        └── image_extender_skill.py
+                               Provider 调用、prompt 生成、图像后处理、
+                               打包和覆盖审计
 ```
 
 ## 配置旋钮

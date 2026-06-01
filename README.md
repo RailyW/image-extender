@@ -449,6 +449,9 @@ Optional custom prompt and art style live in the bottom command bar.
     `openai/gpt-5.4-image-2` (GPT-5.4 Image 2 — high fidelity, slower)
   - Reasoning / vision QA (scene brief, prop art director, tile review):
     `google/gemini-2.0-flash-001`
+- **Codex Skill package** in `skills/image-extender-studio/` for running the
+  same workflows through Markdown orchestration, custom providers, Codex App
+  imagegen, and deterministic Python post-processing scripts.
 
 ## Project structure
 
@@ -482,6 +485,18 @@ app/
 ├── globals.css                Dark "studio" design system
 ├── layout.tsx                 Root layout, Inter font
 └── page.tsx                   App shell: state, generation pipelines, QA loops
+
+skills/
+├── README.md                  Skill module overview
+└── image-extender-studio/
+    ├── SKILL.md               Codex Skill entrypoint and workflow router
+    ├── agents/openai.yaml     UI metadata for Codex skill listings
+    ├── references/            Subskill guides for Extender / Parallax /
+    │                          Tileset / Sprite / Props + provider docs
+    └── scripts/
+        └── image_extender_skill.py
+                               Provider calls, prompt generation, image
+                               post-processing, packaging, and coverage audit
 ```
 
 ## Configuration knobs
