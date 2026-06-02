@@ -1,6 +1,6 @@
 ---
 name: image-extender-studio
-description: Use this skill to run the Image Extender workflows inside Codex instead of the web studio: AI outpainting, parallax backgrounds, 2D autotiles, sprite animations, and transparent prop libraries. Supports BYOK/custom providers for image/text/vision capabilities and can route image generation through the Codex app imagegen tool when requested.
+description: "Use this skill to run the Image Extender workflows inside Codex instead of the web studio: AI outpainting, parallax backgrounds, 2D autotiles, sprite animations, and transparent prop libraries. Supports BYOK/custom providers for image/text/vision capabilities and can route image generation through the Codex app imagegen tool when requested."
 ---
 
 # Image Extender Studio Skill
