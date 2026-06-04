@@ -56,6 +56,7 @@ python3 skills/image-extender-studio/scripts/image_extender_skill.py --help
 python3 skills/image-extender-studio/scripts/image_extender_skill.py providers validate --config providers.example.json
 python3 skills/image-extender-studio/scripts/image_extender_skill.py prompt generate --mode tileset --prompt "mossy stone platform"
 python3 skills/image-extender-studio/scripts/image_extender_skill.py tileset guide --output outputs/tile-guide.png
+python3 skills/image-extender-studio/scripts/image_extender_skill.py sprite process --sheet generated.png --body-plan biped --anim idle --output-dir outputs/sprite --vertical-anchor baseline --horizontal-anchor upper-q75
 ```
 
 图像后处理命令需要 Pillow；Codex App 的内置 Python 通常可用，普通系统 Python 缺少时脚本会给出安装提示。

@@ -52,6 +52,8 @@ SPRITE_GRID_ROWS = 2
 PROP_TILE_SIZE = 512
 PROP_BATCH_COLS = 4
 PROP_BATCH_ROWS = 2
+SPRITE_ALIGN_ALPHA_THRESHOLD = 96
+SPRITE_ALIGN_ALPHA_FLOOR = 24
 
 LAYER_SPECS = {
     "sky": {"speed": 0.05, "opaque": True, "width": 1899, "height": 768},
@@ -131,6 +133,22 @@ BODY_PLAN_ANIMS = {
     "flyer": ["idle", "flap", "glide", "dive", "hurt", "death"],
     "blob": ["idle", "hop", "bounce", "lunge", "hurt", "death"],
 }
+
+
+@dataclass
+class SpriteAlignmentOptions:
+    """保存 sprite 单帧归一化的可调参数。
+
+    alpha_threshold 用于判断主体实像素，alpha_floor 用于剔除 AI 去底后
+    常见的低透明度残边；row/col_min_pixels 为 0 时按画布尺寸自动推导。
+    """
+
+    vertical_anchor: str = "baseline"
+    horizontal_anchor: str = "upper-q75"
+    alpha_threshold: int = SPRITE_ALIGN_ALPHA_THRESHOLD
+    alpha_floor: int = SPRITE_ALIGN_ALPHA_FLOOR
+    row_min_pixels: int = 0
+    col_min_pixels: int = 0
 
 
 @dataclass
@@ -1380,14 +1398,14 @@ def draw_pose_cell(draw: Any, ox: int, oy: int, size: int, body_plan: str, anim:
         draw.line((cx, head_y + 75, cx + 70 + swing, hip - 20), fill=ink, width=8)
 
 
-def process_sprite_sheet(sheet_path: str, output_dir: str, body_plan: str, anim: str) -> dict[str, Any]:
+def process_sprite_sheet(sheet_path: str, output_dir: str, body_plan: str, anim: str, alignment: SpriteAlignmentOptions | None = None) -> dict[str, Any]:
     """处理 sprite sheet：切片、色键、主图隔离、归一化、导出 grid/strip。"""
     Image, _, _ = require_pillow()
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     sheet = load_rgba(sheet_path)
     frames = [chroma_key_image(cell) for cell in slice_grid(sheet, SPRITE_GRID_COLS, SPRITE_GRID_ROWS, SPRITE_FRAME_SIZE)]
-    frames = normalize_sprite_frames(frames)
+    frames, alignment_report = normalize_sprite_frames(frames, alignment or SpriteAlignmentOptions())
 
     frame_entries = []
     for i, frame in enumerate(frames):
@@ -1412,32 +1430,210 @@ def process_sprite_sheet(sheet_path: str, output_dir: str, body_plan: str, anim:
         "grid": "sprite-grid.png",
         "strip": "sprite-strip.png",
         "frames": frame_entries,
+        "alignment": alignment_report,
     }
     write_json(out / "manifest.json", manifest)
     return manifest
 
 
-def normalize_sprite_frames(frames: list[Any]) -> list[Any]:
-    """把 sprite 帧按主体 bbox 居中和基线对齐。"""
+def normalize_sprite_frames(frames: list[Any], options: SpriteAlignmentOptions) -> tuple[list[Any], dict[str, Any]]:
+    """把 sprite 帧按稳定主体锚点和脚底基线对齐。
+
+    旧版直接使用整帧 alpha bbox，披风、裙摆、武器或低 alpha 残边都会
+    进入 bbox，导致角色主体在动画中左右抖动或上下漂移。这里先清理
+    残边，再用高 alpha + 行列最少像素数计算主体 bbox，最后用上身
+    分位数锚点对齐视觉重心。
+    """
     Image, _, _ = require_pillow()
-    boxes = [alpha_bbox(frame) for frame in frames]
-    valid = [box for box in boxes if box]
+    cleaned_frames = [clean_sprite_alpha(frame, options.alpha_floor) for frame in frames]
+    source_metrics = [measure_sprite_frame(frame, options) for frame in cleaned_frames]
+    valid = [metric for metric in source_metrics if metric["bbox"]]
     if not valid:
-        return frames
-    max_bottom = max(box[3] for box in valid)
-    centers = [(box[0] + box[2]) / 2 for box in valid]
-    target_center = sum(centers) / len(centers)
+        return cleaned_frames, {
+            "vertical_anchor": options.vertical_anchor,
+            "horizontal_anchor": options.horizontal_anchor,
+            "alpha_threshold": options.alpha_threshold,
+            "alpha_floor": options.alpha_floor,
+            "frames": source_metrics,
+        }
+
+    baselines = [metric["baseline"] for metric in valid if metric["baseline"] is not None]
+    anchors = [metric["anchor_x"] for metric in valid if metric["anchor_x"] is not None]
+    target_baseline = max(baselines) if options.vertical_anchor == "baseline" and baselines else None
+    target_anchor = median_number(anchors) if options.horizontal_anchor != "none" and anchors else None
     normalized = []
-    for frame, box in zip(frames, boxes):
-        canvas = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-        if not box:
+    report_frames = []
+    for index, (frame, metric) in enumerate(zip(cleaned_frames, source_metrics)):
+        if not metric["bbox"]:
             normalized.append(frame)
+            report_frames.append({"index": index, **metric, "dx": 0, "dy": 0, "aligned_bbox": None, "aligned_baseline": None, "aligned_anchor_x": None})
             continue
-        dx = int(round(target_center - (box[0] + box[2]) / 2))
-        dy = int(round(max_bottom - box[3]))
-        canvas.alpha_composite(frame, (dx, dy))
-        normalized.append(canvas)
-    return normalized
+
+        dx = int(round(float(target_anchor) - float(metric["anchor_x"]))) if target_anchor is not None and metric["anchor_x"] is not None else 0
+        dy = int(round(float(target_baseline) - float(metric["baseline"]))) if target_baseline is not None and metric["baseline"] is not None else 0
+        aligned = shift_sprite_frame(frame, dx, dy)
+        aligned_metric = measure_sprite_frame(aligned, options)
+        normalized.append(aligned)
+        report_frames.append(
+            {
+                "index": index,
+                **metric,
+                "dx": dx,
+                "dy": dy,
+                "aligned_bbox": aligned_metric["bbox"],
+                "aligned_baseline": aligned_metric["baseline"],
+                "aligned_anchor_x": aligned_metric["anchor_x"],
+            }
+        )
+
+    return normalized, {
+        "vertical_anchor": options.vertical_anchor,
+        "horizontal_anchor": options.horizontal_anchor,
+        "alpha_threshold": options.alpha_threshold,
+        "alpha_floor": options.alpha_floor,
+        "row_min_pixels": options.row_min_pixels,
+        "col_min_pixels": options.col_min_pixels,
+        "target_baseline": target_baseline,
+        "target_anchor_x": target_anchor,
+        "frames": report_frames,
+    }
+
+
+def clean_sprite_alpha(image: Any, alpha_floor: int) -> Any:
+    """清理低 alpha 残边，避免去底噪点被当作脚底或外轮廓。"""
+    if alpha_floor <= 0:
+        return image.copy()
+    result = image.copy()
+    pix = result.load()
+    for y in range(result.height):
+        for x in range(result.width):
+            r, g, b, a = pix[x, y]
+            if a <= alpha_floor:
+                pix[x, y] = (r, g, b, 0)
+    return result
+
+
+def measure_sprite_frame(image: Any, options: SpriteAlignmentOptions) -> dict[str, Any]:
+    """返回单帧用于对齐的主体 bbox、脚底 baseline 和水平 anchor。"""
+    box = robust_alpha_bbox(image, options.alpha_threshold, options.row_min_pixels, options.col_min_pixels)
+    if not box:
+        return {"bbox": None, "baseline": None, "anchor_x": None}
+    anchor_x = sprite_anchor_x(image, box, options.horizontal_anchor, options.alpha_threshold)
+    return {"bbox": list(box), "baseline": box[3], "anchor_x": anchor_x}
+
+
+def robust_alpha_bbox(image: Any, threshold: int, row_min_pixels: int = 0, col_min_pixels: int = 0) -> tuple[int, int, int, int] | None:
+    """用高 alpha 和行列像素数阈值计算主体 bbox，过滤孤立噪点。"""
+    pix = image.load()
+    row_min = row_min_pixels or max(4, image.width // 96)
+    col_min = col_min_pixels or max(4, image.height // 128)
+    valid_rows: list[int] = []
+    for y in range(image.height):
+        count = 0
+        for x in range(image.width):
+            if pix[x, y][3] >= threshold:
+                count += 1
+        if count >= row_min:
+            valid_rows.append(y)
+    if not valid_rows:
+        return alpha_bbox(image, threshold)
+
+    top = min(valid_rows)
+    bottom = max(valid_rows) + 1
+    valid_cols: list[int] = []
+    for x in range(image.width):
+        count = 0
+        for y in range(top, bottom):
+            if pix[x, y][3] >= threshold:
+                count += 1
+        if count >= col_min:
+            valid_cols.append(x)
+    if not valid_cols:
+        return alpha_bbox(image, threshold)
+    return (min(valid_cols), top, max(valid_cols) + 1, bottom)
+
+
+def sprite_anchor_x(image: Any, box: tuple[int, int, int, int], mode: str, threshold: int) -> float | None:
+    """按指定策略计算水平锚点，默认使用上身右侧分位数。"""
+    if mode == "none":
+        return None
+    left, top, right, bottom = box
+    if mode == "bbox-center":
+        return (left + right) / 2
+
+    height = max(1, bottom - top)
+    if mode == "feet-center":
+        y1 = top + int(height * 0.78)
+        y2 = bottom
+        quantile = 0.5
+    else:
+        quantile = anchor_mode_quantile(mode)
+        y1 = top + int(height * 0.15)
+        y2 = top + int(height * 0.62)
+
+    xs = alpha_x_samples(image, y1, y2, threshold)
+    if not xs:
+        return (left + right) / 2
+    return quantile_number(xs, quantile)
+
+
+def anchor_mode_quantile(mode: str) -> float:
+    """从 upper-qNN 模式名解析分位数，非法值回落到 q75。"""
+    match = re.fullmatch(r"upper-q(\d{2})", mode)
+    if not match:
+        return 0.75
+    return max(0.0, min(1.0, int(match.group(1)) / 100))
+
+
+def alpha_x_samples(image: Any, y1: int, y2: int, threshold: int) -> list[int]:
+    """采集指定 y 区间内的主体 alpha 像素 x 坐标。"""
+    pix = image.load()
+    start = max(0, min(image.height, y1))
+    end = max(start, min(image.height, y2))
+    xs: list[int] = []
+    for y in range(start, end):
+        for x in range(image.width):
+            if pix[x, y][3] >= threshold:
+                xs.append(x)
+    return xs
+
+
+def quantile_number(values: list[int] | list[float], q: float) -> float:
+    """返回简单线性分位数，用于稳定 anchor 目标。"""
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = max(0.0, min(1.0, q)) * (len(ordered) - 1)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return ordered[lo]
+    return ordered[lo] * (hi - pos) + ordered[hi] * (pos - lo)
+
+
+def median_number(values: list[int] | list[float]) -> float:
+    """返回中位数，避免单帧异常 anchor 拉偏整组目标。"""
+    return quantile_number(values, 0.5)
+
+
+def shift_sprite_frame(frame: Any, dx: int, dy: int) -> Any:
+    """把 frame 平移到同尺寸透明画布，自动裁剪越界区域。"""
+    Image, _, _ = require_pillow()
+    canvas = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+    dst_left = max(0, dx)
+    dst_top = max(0, dy)
+    dst_right = min(frame.width, dx + frame.width)
+    dst_bottom = min(frame.height, dy + frame.height)
+    if dst_right <= dst_left or dst_bottom <= dst_top:
+        return canvas
+    src_left = max(0, -dx)
+    src_top = max(0, -dy)
+    src_right = src_left + (dst_right - dst_left)
+    src_bottom = src_top + (dst_bottom - dst_top)
+    canvas.alpha_composite(frame.crop((src_left, src_top, src_right, src_bottom)), (dst_left, dst_top))
+    return canvas
 
 
 def alpha_bbox(image: Any, threshold: int = 10) -> tuple[int, int, int, int] | None:
@@ -1612,6 +1808,9 @@ def audit_coverage(root: str) -> dict[str, Any]:
         "extract_tileset",
         "build_sprite_guide",
         "process_sprite_sheet",
+        "normalize_sprite_frames",
+        "robust_alpha_bbox",
+        "sprite_anchor_x",
         "process_props_sheet",
         "init_parallax",
         "audit_coverage",
@@ -1768,7 +1967,15 @@ def cmd_sprite_guide(args: argparse.Namespace) -> None:
 
 def cmd_sprite_process(args: argparse.Namespace) -> None:
     """处理 sprite sheet。"""
-    write_json(args.manifest, process_sprite_sheet(args.sheet, args.output_dir, args.body_plan, args.anim))
+    alignment = SpriteAlignmentOptions(
+        vertical_anchor=args.vertical_anchor,
+        horizontal_anchor=args.horizontal_anchor,
+        alpha_threshold=args.alpha_threshold,
+        alpha_floor=args.alpha_floor,
+        row_min_pixels=args.row_min_pixels,
+        col_min_pixels=args.col_min_pixels,
+    )
+    write_json(args.manifest, process_sprite_sheet(args.sheet, args.output_dir, args.body_plan, args.anim, alignment))
 
 
 def cmd_sprite_package(args: argparse.Namespace) -> None:
@@ -2082,6 +2289,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp_process.add_argument("--body-plan", choices=sorted(BODY_PLAN_ANIMS), required=True)
     sp_process.add_argument("--anim", required=True)
     sp_process.add_argument("--output-dir", required=True)
+    sp_process.add_argument("--vertical-anchor", choices=["baseline", "none"], default="baseline")
+    sp_process.add_argument(
+        "--horizontal-anchor",
+        choices=["upper-q50", "upper-q65", "upper-q75", "upper-q85", "bbox-center", "feet-center", "none"],
+        default="upper-q75",
+    )
+    sp_process.add_argument("--alpha-threshold", type=int, default=SPRITE_ALIGN_ALPHA_THRESHOLD)
+    sp_process.add_argument("--alpha-floor", type=int, default=SPRITE_ALIGN_ALPHA_FLOOR)
+    sp_process.add_argument("--row-min-pixels", type=int, default=0)
+    sp_process.add_argument("--col-min-pixels", type=int, default=0)
     sp_process.add_argument("--manifest")
     sp_process.set_defaults(func=cmd_sprite_process)
     sp_package = sprite_sub.add_parser("package")

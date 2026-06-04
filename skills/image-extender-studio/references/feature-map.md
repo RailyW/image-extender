@@ -23,6 +23,9 @@
 | Sprite anchor → sheet | Sprite 子流程 | `prompt generate --mode sprite-anchor|sprite-sheet` |
 | Sprite pose guide | Sprite 子流程 | `sprite guide` |
 | Sprite 色键、单帧切片 | Sprite 子流程 | `sprite process` |
+| Sprite 低 alpha 残边清理 | Sprite 子流程 | `sprite process --alpha-floor` |
+| Sprite 脚底 baseline 固定 | Sprite 子流程 | `sprite process --vertical-anchor baseline` |
+| Sprite 水平上身锚点稳定 | Sprite 子流程 | `sprite process --horizontal-anchor upper-q75` |
 | Sprite scale / baseline / center | Sprite 子流程 | `sprite process` |
 | Sprite strip / grid / ZIP manifest | Sprite 子流程 | `sprite package` |
 | Sprite review | Sprite 子流程 | `prompt review --kind sprite`、`review call` |
